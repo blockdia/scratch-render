@@ -1,4 +1,4 @@
-/* global vm */
+/* global vm, window */
 const {chromium} = require('playwright-chromium');
 const test = require('tap').test;
 const path = require('path');
@@ -67,9 +67,7 @@ const testFile = async (file, page) => {
     const fileInput = await page.$('#file');
     await fileInput.setInputFiles(testDir(file));
     await page.evaluate(() =>
-        // `loadFile` is defined on the page itself.
-        // eslint-disable-next-line no-undef
-        loadFile()
+        window.loadFile()
     );
     const says = await page.evaluate(async useGpuModes => {
         // This function is run INSIDE the integration chrome browser via some

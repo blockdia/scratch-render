@@ -1,4 +1,4 @@
-/* global vm, render */
+/* global vm, render, window */
 const {chromium} = require('playwright-chromium');
 const test = require('tap').test;
 const path = require('path');
@@ -13,9 +13,7 @@ const runFile = async (file, action, page, script) => {
     await fileInput.setInputFiles(testDir(file));
 
     await page.evaluate(() =>
-        // `loadFile` is defined on the page itself.
-        // eslint-disable-next-line no-undef
-        loadFile()
+        window.loadFile()
     );
     return page.evaluate(`(function () {return (${script})(${action});})()`);
 };
