@@ -1,6 +1,6 @@
 {
   "name": "@blockdia/scratch-render",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Blockdia WebGL renderer based on TurboWarp and Scratch 3.0",
   "author": "Massachusetts Institute of Technology",
   "license": "MPL-2.0",
