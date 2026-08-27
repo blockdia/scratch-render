@@ -1,6 +1,8 @@
-# TurboWarp/scratch-render
+# @blockdia/scratch-render
 
-scratch-render modified for use in [TurboWarp](https://turbowarp.org/). We've optimized some operations and added a lot of options.
+Blockdia's renderer, based on the [TurboWarp](https://turbowarp.org/) scratch-render fork and its optimized operations and additional options.
+
+The initial Blockdia `0.1.0` release is based on TurboWarp commit `a67f7c9c07d459582c227d4fd3fae8f59d8fc9ce`.
 
 ## Setup
 

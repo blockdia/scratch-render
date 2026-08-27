@@ -1,13 +1,20 @@
 {
-  "name": "scratch-render",
+  "name": "@blockdia/scratch-render",
   "version": "0.1.0",
-  "description": "WebGL Renderer for Scratch 3.0",
+  "description": "Blockdia WebGL renderer based on TurboWarp and Scratch 3.0",
   "author": "Massachusetts Institute of Technology",
   "license": "MPL-2.0",
-  "homepage": "https://github.com/LLK/scratch-render#readme",
+  "homepage": "https://github.com/blockdia/scratch-render#readme",
   "repository": {
     "type": "git",
-    "url": "git+ssh://git@github.com/LLK/scratch-render.git"
+    "url": "https://github.com/blockdia/scratch-render.git"
+  },
+  "bugs": {
+    "url": "https://github.com/blockdia/scratch-render/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
   },
   "main": "./dist/node/scratch-render.js",
   "browser": "./src/index.js",
@@ -48,13 +55,12 @@
   "dependencies": {
     "@turbowarp/ancient-hull.js": "^0.2.13",
     "@turbowarp/nanolog": "^0.2.0",
-    "@turbowarp/scratch-svg-renderer": "^1.0.0-202312242305-12c360b",
+    "@blockdia/scratch-svg-renderer": "^0.1.0",
     "grapheme-breaker": "0.3.2",
     "ify-loader": "1.0.4",
     "linebreak": "0.3.0",
     "raw-loader": "^0.5.1",
     "scratch-storage": "^1.0.0",
     "twgl.js": "4.4.0"
-  },
-  "private": true
+  }
 }

@@ -14,3 +14,4 @@
 
 # Exclude already built packages from testing with npm pack
 /scratch-render-*.{tar,tgz}
+/blockdia-scratch-render-*.tgz
