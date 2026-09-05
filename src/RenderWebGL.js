@@ -1171,10 +1171,12 @@ class RenderWebGL extends EventEmitter {
      * @param {int} drawableID The ID of the Drawable to check.
      * @param {Array<int>} color3b Test if the Drawable is touching this color.
      * @param {Array<int>} [mask3b] Optionally mask the check to this part of Drawable.
+     * @param {Array<int>} excludedIDs Drawables belonging to the querying target.
      * @returns {boolean} True iff the Drawable is touching the color.
      */
-    isTouchingColor (drawableID, color3b, mask3b) {
-        const candidates = this._candidatesTouching(drawableID, this._visibleDrawList);
+    isTouchingColor (drawableID, color3b, mask3b, excludedIDs = []) {
+        const candidates = this._candidatesTouching(drawableID,
+            this._visibleDrawList.filter(id => !excludedIDs.includes(id)));
 
         let bounds;
         if (colorMatches(color3b, this._backgroundColor3b, 0)) {
