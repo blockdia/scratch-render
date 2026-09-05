@@ -192,6 +192,9 @@ class RenderWebGL extends EventEmitter {
 
         /** @type {Array<int>} */
         this._drawList = [];
+        this._drawableGroups = new Map();
+        this._drawableGroupById = new Map();
+        this._nextDrawableGroupId = 0;
 
         // A list of layer group names in the order they should appear
         // from furthest back to furthest in front.
@@ -719,6 +722,103 @@ class RenderWebGL extends EventEmitter {
     }
 
     /**
+     * Create an atomic, ordered set of drawables within one existing layer group.
+     * Skins remain independently owned by the caller.
+     * @param {string} layerGroup Existing renderer layer group.
+     * @param {number} partCount Positive number of parts, in back-to-front order.
+     * @returns {number} Opaque drawable group ID (not a drawable ID).
+     */
+    createDrawableGroup (layerGroup, partCount) {
+        if (!Object.prototype.hasOwnProperty.call(this._layerGroups, layerGroup) ||
+            !Number.isInteger(partCount) || partCount < 1) {
+            throw new Error('Drawable groups require a known layer group and a positive part count');
+        }
+        const id = this._nextDrawableGroupId++;
+        const drawables = [];
+        for (let i = 0; i < partCount; i++) {
+            const drawableID = this.createDrawable(layerGroup);
+            drawables.push(drawableID);
+            this._drawableGroupById.set(drawableID, id);
+        }
+        this._drawableGroups.set(id, {layerGroup, drawables});
+        this.dirty = true;
+        return id;
+    }
+
+    /**
+     * Get the ordered parts of a group.
+     * @param {number} id Group ID.
+     * @returns {Array<number>} A copy of its part IDs.
+     */
+    getDrawableGroupMembers (id) {
+        const group = this._drawableGroups.get(id);
+        return group ? group.drawables.slice() : [];
+    }
+
+    /**
+     * Destroy all parts, but not their skins.
+     * @param {number} id Group ID.
+     * @returns {undefined} Nothing.
+     */
+    destroyDrawableGroup (id) {
+        const group = this._drawableGroups.get(id);
+        if (!group) return;
+        for (const drawableID of group.drawables.slice()) {
+            this.destroyDrawable(drawableID, group.layerGroup);
+        }
+    }
+
+    /**
+     * Reorder an entire group using the same contract as setDrawableOrder.
+     * Relative steps count atomic groups and ordinary drawables, not individual parts.
+     * @param {number} id Group ID.
+     * @param {number} order Absolute draw-list index or relative number of units.
+     * @param {boolean} relative Whether order is relative.
+     * @param {number} min Minimum index relative to the layer-group start.
+     * @returns {?number} New first-part index, or null for an unknown group.
+     */
+    setDrawableGroupOrder (id, order, relative, min) {
+        const group = this._drawableGroups.get(id);
+        return group ? this.setDrawableOrder(group.drawables[0], order, group.layerGroup, relative, min) : null;
+    }
+
+    _setAtomicDrawableOrder (drawableID, order, layerGroup, relative, optMin) {
+        const start = layerGroup.drawListOffset;
+        const end = this._endIndexForKnownLayerGroup(layerGroup);
+        const units = [];
+        for (let i = start; i < end;) {
+            const id = this._drawList[i];
+            const group = this._drawableGroups.get(this._drawableGroupById.get(id));
+            const members = group ? group.drawables.slice() : [id];
+            units.push(members);
+            i += members.length;
+        }
+        const oldUnit = units.findIndex(ids => ids.includes(drawableID));
+        if (oldUnit < 0) return null;
+        const oldIndex = this._drawList.indexOf(units[oldUnit][0]);
+        if (order === 0) return oldIndex;
+        const moving = units.splice(oldUnit, 1)[0];
+        const minimum = (optMin || 0) + start;
+        const min = minimum >= start && minimum < end ? minimum : start;
+        let destination;
+        if (relative) {
+            destination = Math.max(0, Math.min(units.length, oldUnit + Math.trunc(order)));
+        } else {
+            destination = 0;
+            let offset = start;
+            while (destination < units.length && offset < order) {
+                offset += units[destination++].length;
+            }
+        }
+        let offset = start;
+        for (let i = 0; i < destination; i++) offset += units[i].length;
+        while (destination < units.length && offset < min) offset += units[destination++].length;
+        units.splice(destination, 0, moving);
+        this._drawList.splice(start, end - start, ...[].concat(...units));
+        return this._drawList.indexOf(moving[0]);
+    }
+
+    /**
      * @param {CanvasMeasurementProvider} measurementProvider helper for measuring text
      * @returns {TextWrapper} an instance of TextWrapper
      */
@@ -810,6 +910,16 @@ class RenderWebGL extends EventEmitter {
             log.warn('Cannot destroy drawable without known layer group.');
             return;
         }
+        const owner = this._drawableGroups.get(this._drawableGroupById.get(drawableID));
+        if (owner && owner.layerGroup !== group) return;
+        if (!this._allDrawables[drawableID]) return;
+        if (owner) {
+            owner.drawables.splice(owner.drawables.indexOf(drawableID), 1);
+            if (owner.drawables.length === 0) {
+                this._drawableGroups.delete(this._drawableGroupById.get(drawableID));
+            }
+            this._drawableGroupById.delete(drawableID);
+        }
         this.dirty = true;
         const drawable = this._allDrawables[drawableID];
         drawable.dispose();
@@ -868,6 +978,9 @@ class RenderWebGL extends EventEmitter {
 
         this.dirty = true;
         const currentLayerGroup = this._layerGroups[group];
+        if (Array.from(this._drawableGroups.values()).some(owner => owner.layerGroup === group)) {
+            return this._setAtomicDrawableOrder(drawableID, order, currentLayerGroup, optIsRelative, optMin);
+        }
         const startIndex = currentLayerGroup.drawListOffset;
         const endIndex = this._endIndexForKnownLayerGroup(currentLayerGroup);
 
