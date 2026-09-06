@@ -1579,7 +1579,12 @@ class RenderWebGL extends EventEmitter {
         const nativeCenterX = this._nativeSize[0] * 0.5;
         const nativeCenterY = this._nativeSize[1] * 0.5;
 
+        const group = this._drawableGroups.get(this._drawableGroupById.get(drawableID));
+        const drawableIDs = group ? group.drawables : [drawableID];
         const scratchBounds = drawable.getFastBounds();
+        for (const id of drawableIDs) {
+            Rectangle.union(scratchBounds, this._allDrawables[id].getFastBounds(), scratchBounds);
+        }
 
         const canvas = this.canvas;
         // Ratio of the screen-space scale of the stage's canvas to the "native size" of the stage
@@ -1633,7 +1638,7 @@ class RenderWebGL extends EventEmitter {
 
             gl.clearColor(0, 0, 0, 0);
             gl.clear(gl.COLOR_BUFFER_BIT);
-            this._drawThese([drawableID], ShaderManager.DRAW_MODE.straightAlpha, projection,
+            this._drawThese(drawableIDs, ShaderManager.DRAW_MODE.straightAlpha, projection,
                 {
                     // Don't apply the ghost effect. TODO: is this an intentional design decision?
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask,
