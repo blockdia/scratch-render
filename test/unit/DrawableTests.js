@@ -146,3 +146,46 @@ test('rotate and scale', t => {
 
     t.end();
 });
+
+
+test('costume-local clipping follows transforms and precedes effects in CPU sensing', t => {
+    const drawable = new Drawable(0, {});
+    const skin = new MockSkin(0, mockRenderer(drawable));
+    drawable.skin = skin;
+    skin.size = [180, 12];
+    skin.rotationCenter = [90, 6];
+    skin.updateSilhouette = () => {};
+    skin.useNearest = () => true;
+    skin.isTouchingNearest = point => point[0] >= 0 && point[0] <= 1 && point[1] >= 0 && point[1] <= 1;
+    skin.isTouchingLinear = skin.isTouchingNearest;
+    skin._silhouette.colorAtNearest = (point, out) => out.fill(255);
+    drawable.updateClipPlane([1, 0, 0]);
+    for (const direction of [90, 0, -90, 180]) {
+        for (const mirror of [1, -1]) {
+            drawable.updateProperties({position: [20, 30], direction, scale: [150 * mirror, 150]});
+            drawable.updateCPURenderAttributes();
+            const angle = (90 - direction) * Math.PI / 180;
+            const point = x => [20 + (x * mirror * 1.5 * Math.cos(angle)),
+                30 + (x * mirror * 1.5 * Math.sin(angle))];
+            t.ok(drawable.isTouching(point(-40)), 'revealed half remains touchable');
+            t.notOk(drawable.isTouching(point(40)), 'clipped half does not collide');
+            t.same(Array.from(Drawable.sampleColor4b(point(40), drawable, new Uint8ClampedArray(4))),
+                [0, 0, 0, 0], 'clipped pixels do not contribute to color sensing');
+        }
+    }
+    drawable.updateProperties({direction: 90, scale: [100, 100], position: [0, 0]});
+    drawable.updateEffect('mosaic', 50);
+    drawable.updateCPURenderAttributes();
+    t.notOk(drawable.isTouching([40, 0]), 'mosaic cannot wrap a clipped point back into the costume');
+    skin.useNearest = () => false;
+    drawable.updateCPURenderAttributes();
+    t.notOk(drawable.isTouching([40, 0]), 'linear picking also respects clipping');
+    drawable.updateClipPlane(null);
+    t.ok(drawable.isTouching([40, 0]), 'clearing the clip restores sensing');
+    drawable.updateClipPlane([0, 1, 0]);
+    drawable.updateCPURenderAttributes();
+    t.ok(drawable.isTouching([0, -3]), 'vertical clip uses positive y up');
+    t.notOk(drawable.isTouching([0, 3]));
+    t.throws(() => drawable.updateClipPlane([NaN, 0, 0]));
+    t.end();
+});

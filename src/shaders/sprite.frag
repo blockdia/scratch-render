@@ -44,6 +44,7 @@ uniform vec4 u_backgroundColor;
 #endif // DRAW_MODE_background
 
 uniform sampler2D u_skin;
+uniform vec3 u_clipPlane;
 
 #ifndef DRAW_MODE_background
 varying vec2 v_texCoord;
@@ -116,6 +117,7 @@ const vec2 kCenter = vec2(0.5, 0.5);
 void main()
 {
 	#if !(defined(DRAW_MODE_line) || defined(DRAW_MODE_background))
+	if (dot(v_texCoord, u_clipPlane.xy) > u_clipPlane.z) discard;
 	vec2 texcoord0 = v_texCoord;
 
 	#ifdef ENABLE_mosaic

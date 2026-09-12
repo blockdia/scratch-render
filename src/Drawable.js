@@ -42,6 +42,11 @@ const getLocalPosition = (drawable, vec) => {
     // TODO: Check if this can be removed after render pull 479 is merged
     if (Math.abs(localPosition[0]) < FLOATING_POINT_ERROR_ALLOWANCE) localPosition[0] = 0;
     if (Math.abs(localPosition[1]) < FLOATING_POINT_ERROR_ALLOWANCE) localPosition[1] = 0;
+    if (drawable.isTexturePositionClipped(localPosition)) {
+        localPosition[0] = -1;
+        localPosition[1] = -1;
+        return localPosition;
+    }
     // Apply texture effect transform if the localPosition is within the drawable's space,
     // and any effects are currently active.
     if (drawable.enabledEffects !== 0 &&
@@ -83,7 +88,8 @@ class Drawable {
              * The color to use in the silhouette draw mode.
              * @type {Array<number>}
              */
-            u_silhouetteColor: Drawable.color4fFromID(this._id)
+            u_silhouetteColor: Drawable.color4fFromID(this._id),
+            u_clipPlane: [0, 0, 0]
         };
 
         // Effect values are uniforms too
@@ -108,6 +114,7 @@ class Drawable {
         this._inverseMatrix = twgl.m4.identity();
         this._inverseTransformDirty = true;
         this._visible = true;
+        this._clipPlane = null;
 
         /** A bitmask identifying which effects are currently in use.
          * @readonly
@@ -197,7 +204,51 @@ class Drawable {
         if (this._transformDirty) {
             this._calculateTransform();
         }
+        this._updateClipUniform();
         return this._uniforms;
+    }
+
+    /**
+     * Keep the half-plane nx*x + ny*y <= distance in costume coordinates (+y up).
+     * Clipping is applied before texture effects, in both GPU and CPU rendering.
+     * @param {?Array<number>} plane [nx, ny, distance], or null to disable.
+     */
+    updateClipPlane (plane) {
+        if (plane && (plane.length !== 3 || !plane.every(Number.isFinite))) {
+            throw new Error('Invalid drawable clip plane');
+        }
+        if ((!plane && !this._clipPlane) || (plane && this._clipPlane &&
+            plane.every((value, index) => value === this._clipPlane[index]))) return;
+        this._clipPlane = plane ? plane.slice() : null;
+        this.setConvexHullDirty();
+        this._updateClipUniform();
+    }
+
+    _updateClipUniform () {
+        const out = this._uniforms.u_clipPlane;
+        if (!this._clipPlane || !this.skin) {
+            out[0] = out[1] = out[2] = 0;
+            return;
+        }
+        const [nx, ny, distance] = this._clipPlane;
+        const [width, height] = this.skin.size;
+        const center = this.skin.rotationCenter;
+        // Normalize to keep fragment shader mediump arithmetic within range.
+        const divisor = Math.max(1, Math.abs(nx * width), Math.abs(ny * height),
+            Math.abs(distance + (nx * center[0]) - (ny * center[1])));
+        out[0] = nx * width / divisor;
+        out[1] = -ny * height / divisor;
+        out[2] = (distance + (nx * center[0]) - (ny * center[1])) / divisor;
+    }
+
+    /**
+     * Test an uneffected texture position after updating CPU render attributes.
+     * @param {Array<number>} point Texture coordinates.
+     * @returns {boolean} Whether this point is clipped.
+     */
+    isTexturePositionClipped (point) {
+        const plane = this._uniforms.u_clipPlane;
+        return ((point[0] * plane[0]) + (point[1] * plane[1])) > plane[2];
     }
 
     /**
@@ -658,6 +709,7 @@ class Drawable {
      */
     updateCPURenderAttributes () {
         this.updateMatrix();
+        this._updateClipUniform();
         // CPU rendering always occurs at the "native" size, so no need to scale up this._scale
         if (this.skin) {
             this.skin.updateSilhouette(this._scale);

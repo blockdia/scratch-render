@@ -1917,6 +1917,16 @@ class RenderWebGL extends EventEmitter {
     }
 
     /**
+     * Clip a drawable in its costume coordinate system, independently of target transforms.
+     * @param {number} drawableID Drawable ID.
+     * @param {?Array<number>} plane [nx, ny, distance] keeping nx*x + ny*y <= distance, or null.
+     */
+    updateDrawableClipPlane (drawableID, plane) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateClipPlane(plane);
+    }
+
+    /**
      * Update a drawable's visual effect.
      * @param {number} drawableID The drawable's id.
      * @param {string} effectName The effect to change.
@@ -2358,6 +2368,7 @@ class RenderWebGL extends EventEmitter {
             let x = 0;
             for (; x < width; x++) {
                 _pixelPos[0] = x / width;
+                if (drawable.isTexturePositionClipped(_pixelPos)) continue;
                 EffectTransform.transformPoint(drawable, _pixelPos, _effectPos);
                 if (drawable.skin.isTouchingLinear(_effectPos)) {
                     currentPoint = [x, y];
@@ -2395,6 +2406,7 @@ class RenderWebGL extends EventEmitter {
             // Now we repeat the process for the right side, looking leftwards for a pixel.
             for (x = width - 1; x >= 0; x--) {
                 _pixelPos[0] = x / width;
+                if (drawable.isTexturePositionClipped(_pixelPos)) continue;
                 EffectTransform.transformPoint(drawable, _pixelPos, _effectPos);
                 if (drawable.skin.isTouchingLinear(_effectPos)) {
                     currentPoint = [x, y];
