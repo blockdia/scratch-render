@@ -220,6 +220,7 @@ class Drawable {
         if ((!plane && !this._clipPlane) || (plane && this._clipPlane &&
             plane.every((value, index) => value === this._clipPlane[index]))) return;
         this._clipPlane = plane ? plane.slice() : null;
+        this._renderer.dirty = true;
         this.setConvexHullDirty();
         this._updateClipUniform();
     }

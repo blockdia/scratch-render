@@ -189,3 +189,18 @@ test('costume-local clipping follows transforms and precedes effects in CPU sens
     t.throws(() => drawable.updateClipPlane([NaN, 0, 0]));
     t.end();
 });
+
+
+test('clip changes invalidate rendering without unrelated drawable updates', t => {
+    const renderer = {dirty: false};
+    const drawable = new Drawable(0, renderer);
+    for (const plane of [[1, 0, 0], [1, 0, 10], null]) {
+        renderer.dirty = false;
+        drawable.updateClipPlane(plane);
+        t.ok(renderer.dirty, 'changing or clearing clipping requests a redraw');
+        renderer.dirty = false;
+        drawable.updateClipPlane(plane);
+        t.notOk(renderer.dirty, 'unchanged clipping does not request a redraw');
+    }
+    t.end();
+});
