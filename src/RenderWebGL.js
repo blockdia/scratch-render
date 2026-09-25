@@ -192,6 +192,9 @@ class RenderWebGL extends EventEmitter {
 
         /** @type {Array<int>} */
         this._drawList = [];
+        this._drawableGroups = new Map();
+        this._drawableGroupById = new Map();
+        this._nextDrawableGroupId = 0;
 
         // A list of layer group names in the order they should appear
         // from furthest back to furthest in front.
@@ -719,6 +722,103 @@ class RenderWebGL extends EventEmitter {
     }
 
     /**
+     * Create an atomic, ordered set of drawables within one existing layer group.
+     * Skins remain independently owned by the caller.
+     * @param {string} layerGroup Existing renderer layer group.
+     * @param {number} partCount Positive number of parts, in back-to-front order.
+     * @returns {number} Opaque drawable group ID (not a drawable ID).
+     */
+    createDrawableGroup (layerGroup, partCount) {
+        if (!Object.prototype.hasOwnProperty.call(this._layerGroups, layerGroup) ||
+            !Number.isInteger(partCount) || partCount < 1) {
+            throw new Error('Drawable groups require a known layer group and a positive part count');
+        }
+        const id = this._nextDrawableGroupId++;
+        const drawables = [];
+        for (let i = 0; i < partCount; i++) {
+            const drawableID = this.createDrawable(layerGroup);
+            drawables.push(drawableID);
+            this._drawableGroupById.set(drawableID, id);
+        }
+        this._drawableGroups.set(id, {layerGroup, drawables});
+        this.dirty = true;
+        return id;
+    }
+
+    /**
+     * Get the ordered parts of a group.
+     * @param {number} id Group ID.
+     * @returns {Array<number>} A copy of its part IDs.
+     */
+    getDrawableGroupMembers (id) {
+        const group = this._drawableGroups.get(id);
+        return group ? group.drawables.slice() : [];
+    }
+
+    /**
+     * Destroy all parts, but not their skins.
+     * @param {number} id Group ID.
+     * @returns {undefined} Nothing.
+     */
+    destroyDrawableGroup (id) {
+        const group = this._drawableGroups.get(id);
+        if (!group) return;
+        for (const drawableID of group.drawables.slice()) {
+            this.destroyDrawable(drawableID, group.layerGroup);
+        }
+    }
+
+    /**
+     * Reorder an entire group using the same contract as setDrawableOrder.
+     * Relative steps count atomic groups and ordinary drawables, not individual parts.
+     * @param {number} id Group ID.
+     * @param {number} order Absolute draw-list index or relative number of units.
+     * @param {boolean} relative Whether order is relative.
+     * @param {number} min Minimum index relative to the layer-group start.
+     * @returns {?number} New first-part index, or null for an unknown group.
+     */
+    setDrawableGroupOrder (id, order, relative, min) {
+        const group = this._drawableGroups.get(id);
+        return group ? this.setDrawableOrder(group.drawables[0], order, group.layerGroup, relative, min) : null;
+    }
+
+    _setAtomicDrawableOrder (drawableID, order, layerGroup, relative, optMin) {
+        const start = layerGroup.drawListOffset;
+        const end = this._endIndexForKnownLayerGroup(layerGroup);
+        const units = [];
+        for (let i = start; i < end;) {
+            const id = this._drawList[i];
+            const group = this._drawableGroups.get(this._drawableGroupById.get(id));
+            const members = group ? group.drawables.slice() : [id];
+            units.push(members);
+            i += members.length;
+        }
+        const oldUnit = units.findIndex(ids => ids.includes(drawableID));
+        if (oldUnit < 0) return null;
+        const oldIndex = this._drawList.indexOf(units[oldUnit][0]);
+        if (order === 0) return oldIndex;
+        const moving = units.splice(oldUnit, 1)[0];
+        const minimum = (optMin || 0) + start;
+        const min = minimum >= start && minimum < end ? minimum : start;
+        let destination;
+        if (relative) {
+            destination = Math.max(0, Math.min(units.length, oldUnit + Math.trunc(order)));
+        } else {
+            destination = 0;
+            let offset = start;
+            while (destination < units.length && offset < order) {
+                offset += units[destination++].length;
+            }
+        }
+        let offset = start;
+        for (let i = 0; i < destination; i++) offset += units[i].length;
+        while (destination < units.length && offset < min) offset += units[destination++].length;
+        units.splice(destination, 0, moving);
+        this._drawList.splice(start, end - start, ...[].concat(...units));
+        return this._drawList.indexOf(moving[0]);
+    }
+
+    /**
      * @param {CanvasMeasurementProvider} measurementProvider helper for measuring text
      * @returns {TextWrapper} an instance of TextWrapper
      */
@@ -810,6 +910,16 @@ class RenderWebGL extends EventEmitter {
             log.warn('Cannot destroy drawable without known layer group.');
             return;
         }
+        const owner = this._drawableGroups.get(this._drawableGroupById.get(drawableID));
+        if (owner && owner.layerGroup !== group) return;
+        if (!this._allDrawables[drawableID]) return;
+        if (owner) {
+            owner.drawables.splice(owner.drawables.indexOf(drawableID), 1);
+            if (owner.drawables.length === 0) {
+                this._drawableGroups.delete(this._drawableGroupById.get(drawableID));
+            }
+            this._drawableGroupById.delete(drawableID);
+        }
         this.dirty = true;
         const drawable = this._allDrawables[drawableID];
         drawable.dispose();
@@ -868,6 +978,9 @@ class RenderWebGL extends EventEmitter {
 
         this.dirty = true;
         const currentLayerGroup = this._layerGroups[group];
+        if (Array.from(this._drawableGroups.values()).some(owner => owner.layerGroup === group)) {
+            return this._setAtomicDrawableOrder(drawableID, order, currentLayerGroup, optIsRelative, optMin);
+        }
         const startIndex = currentLayerGroup.drawListOffset;
         const endIndex = this._endIndexForKnownLayerGroup(currentLayerGroup);
 
@@ -1058,10 +1171,12 @@ class RenderWebGL extends EventEmitter {
      * @param {int} drawableID The ID of the Drawable to check.
      * @param {Array<int>} color3b Test if the Drawable is touching this color.
      * @param {Array<int>} [mask3b] Optionally mask the check to this part of Drawable.
+     * @param {Array<int>} excludedIDs Drawables belonging to the querying target.
      * @returns {boolean} True iff the Drawable is touching the color.
      */
-    isTouchingColor (drawableID, color3b, mask3b) {
-        const candidates = this._candidatesTouching(drawableID, this._visibleDrawList);
+    isTouchingColor (drawableID, color3b, mask3b, excludedIDs = []) {
+        const candidates = this._candidatesTouching(drawableID,
+            this._visibleDrawList.filter(id => !excludedIDs.includes(id)));
 
         let bounds;
         if (colorMatches(color3b, this._backgroundColor3b, 0)) {
@@ -1464,7 +1579,12 @@ class RenderWebGL extends EventEmitter {
         const nativeCenterX = this._nativeSize[0] * 0.5;
         const nativeCenterY = this._nativeSize[1] * 0.5;
 
+        const group = this._drawableGroups.get(this._drawableGroupById.get(drawableID));
+        const drawableIDs = group ? group.drawables : [drawableID];
         const scratchBounds = drawable.getFastBounds();
+        for (const id of drawableIDs) {
+            Rectangle.union(scratchBounds, this._allDrawables[id].getFastBounds(), scratchBounds);
+        }
 
         const canvas = this.canvas;
         // Ratio of the screen-space scale of the stage's canvas to the "native size" of the stage
@@ -1518,7 +1638,7 @@ class RenderWebGL extends EventEmitter {
 
             gl.clearColor(0, 0, 0, 0);
             gl.clear(gl.COLOR_BUFFER_BIT);
-            this._drawThese([drawableID], ShaderManager.DRAW_MODE.straightAlpha, projection,
+            this._drawThese(drawableIDs, ShaderManager.DRAW_MODE.straightAlpha, projection,
                 {
                     // Don't apply the ghost effect. TODO: is this an intentional design decision?
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask,
@@ -1794,6 +1914,16 @@ class RenderWebGL extends EventEmitter {
         // TODO: https://github.com/LLK/scratch-vm/issues/2288
         if (!drawable) return;
         drawable.updateVisible(visible);
+    }
+
+    /**
+     * Clip a drawable in its costume coordinate system, independently of target transforms.
+     * @param {number} drawableID Drawable ID.
+     * @param {?Array<number>} plane [nx, ny, distance] keeping nx*x + ny*y <= distance, or null.
+     */
+    updateDrawableClipPlane (drawableID, plane) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateClipPlane(plane);
     }
 
     /**
@@ -2238,6 +2368,7 @@ class RenderWebGL extends EventEmitter {
             let x = 0;
             for (; x < width; x++) {
                 _pixelPos[0] = x / width;
+                if (drawable.isTexturePositionClipped(_pixelPos)) continue;
                 EffectTransform.transformPoint(drawable, _pixelPos, _effectPos);
                 if (drawable.skin.isTouchingLinear(_effectPos)) {
                     currentPoint = [x, y];
@@ -2275,6 +2406,7 @@ class RenderWebGL extends EventEmitter {
             // Now we repeat the process for the right side, looking leftwards for a pixel.
             for (x = width - 1; x >= 0; x--) {
                 _pixelPos[0] = x / width;
+                if (drawable.isTexturePositionClipped(_pixelPos)) continue;
                 EffectTransform.transformPoint(drawable, _pixelPos, _effectPos);
                 if (drawable.skin.isTouchingLinear(_effectPos)) {
                     currentPoint = [x, y];
