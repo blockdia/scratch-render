@@ -809,6 +809,11 @@ class RenderWebGL extends EventEmitter {
         return this._setAtomicDrawableOrder(null, order, layer, relative, 0, path);
     }
 
+    updateDrawableParentTransform (drawableID, matrix) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateParentTransform(matrix);
+    }
+
     _drawableOrderTree (layer) {
         return new DrawableOrderTree(
             this._drawList.slice(layer.drawListOffset, this._endIndexForKnownLayerGroup(layer)),
@@ -1991,24 +1996,29 @@ class RenderWebGL extends EventEmitter {
             return [x, y];
         }
 
-        const dx = x - drawable._position[0];
-        const dy = y - drawable._position[1];
+        const p = drawable._parentTransform;
+        [x, y] = [(p[0] * x) + (p[2] * y) + p[4], (p[1] * x) + (p[3] * y) + p[5]];
+        const current = drawable.getWorldPosition();
+        const dx = x - current[0];
+        const dy = y - current[1];
         const aabb = drawable._skin.getFenceBounds(drawable, __fenceBounds);
         const inset = Math.floor(Math.min(aabb.width, aabb.height) / 2);
 
         const sx = this._xRight - Math.min(FENCE_WIDTH, inset);
         if (aabb.right + dx < -sx) {
-            x = Math.ceil(drawable._position[0] - (sx + aabb.right));
+            x = Math.ceil(current[0] - (sx + aabb.right));
         } else if (aabb.left + dx > sx) {
-            x = Math.floor(drawable._position[0] + (sx - aabb.left));
+            x = Math.floor(current[0] + (sx - aabb.left));
         }
         const sy = this._yTop - Math.min(FENCE_WIDTH, inset);
         if (aabb.top + dy < -sy) {
-            y = Math.ceil(drawable._position[1] - (sy + aabb.top));
+            y = Math.ceil(current[1] - (sy + aabb.top));
         } else if (aabb.bottom + dy > sy) {
-            y = Math.floor(drawable._position[1] + (sy - aabb.bottom));
+            y = Math.floor(current[1] + (sy - aabb.bottom));
         }
-        return [x, y];
+        const det = (p[0] * p[3]) - (p[1] * p[2]);
+        return [((p[3] * (x - p[4])) - (p[2] * (y - p[5]))) / det,
+            ((p[0] * (y - p[5])) - (p[1] * (x - p[4]))) / det];
     }
 
     /**

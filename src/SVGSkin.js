@@ -82,6 +82,15 @@ class SVGSkin extends Skin {
             return false;
         }
 
+        // Texture resolution is conservative under parent transforms; it need not
+        // match the actual pixel scale on both axes. Only unit axis-aligned parents
+        // preserve the nearest-neighbor assumptions below.
+        const parent = drawable._parentTransform;
+        if (parent && (Math.abs(parent[1]) > 1e-6 || Math.abs(parent[2]) > 1e-6 ||
+            Math.abs(Math.abs(parent[0]) - 1) > 1e-6 || Math.abs(Math.abs(parent[3]) - 1) > 1e-6)) {
+            return false;
+        }
+
         // Because SVG skins' bounding boxes are currently not pixel-aligned, the idea here is to hide blurriness
         // by using nearest-neighbor scaling if one screen-space pixel is "close enough" to one texture pixel.
         // If the scale of the skin is very close to 100 (0.99999 variance is okay I guess)
