@@ -7,6 +7,7 @@ const SVGRenderer = require('@blockdia/scratch-svg-renderer');
 const Skin = require('./Skin');
 const BitmapSkin = require('./BitmapSkin');
 const Drawable = require('./Drawable');
+const DrawableOrderTree = require('./DrawableOrderTree');
 const Rectangle = require('./Rectangle');
 const PenSkin = require('./PenSkin');
 const RenderConstants = require('./RenderConstants');
@@ -195,6 +196,7 @@ class RenderWebGL extends EventEmitter {
         this._drawableGroups = new Map();
         this._drawableGroupById = new Map();
         this._nextDrawableGroupId = 0;
+        this._drawableContainerPaths = new Map();
 
         // A list of layer group names in the order they should appear
         // from furthest back to furthest in front.
@@ -782,40 +784,50 @@ class RenderWebGL extends EventEmitter {
         return group ? this.setDrawableOrder(group.drawables[0], order, group.layerGroup, relative, min) : null;
     }
 
-    _setAtomicDrawableOrder (drawableID, order, layerGroup, relative, optMin) {
-        const start = layerGroup.drawListOffset;
-        const end = this._endIndexForKnownLayerGroup(layerGroup);
-        const units = [];
-        for (let i = start; i < end;) {
-            const id = this._drawList[i];
-            const group = this._drawableGroups.get(this._drawableGroupById.get(id));
-            const members = group ? group.drawables.slice() : [id];
-            units.push(members);
-            i += members.length;
-        }
-        const oldUnit = units.findIndex(ids => ids.includes(drawableID));
-        if (oldUnit < 0) return null;
-        const oldIndex = this._drawList.indexOf(units[oldUnit][0]);
-        if (order === 0) return oldIndex;
-        const moving = units.splice(oldUnit, 1)[0];
-        const minimum = (optMin || 0) + start;
-        const min = minimum >= start && minimum < end ? minimum : start;
-        let destination;
-        if (relative) {
-            destination = Math.max(0, Math.min(units.length, oldUnit + Math.trunc(order)));
-        } else {
-            destination = 0;
-            let offset = start;
-            while (destination < units.length && offset < order) {
-                offset += units[destination++].length;
+    // Replace membership for one scene layer, then make every subtree contiguous.
+    setDrawableContainerPaths (group, memberships) {
+        const layer = this._layerGroups[group];
+        if (!layer) return;
+        if (!this._drawableContainerPaths) this._drawableContainerPaths = new Map();
+        const start = layer.drawListOffset;
+        const end = this._endIndexForKnownLayerGroup(layer);
+        const ids = new Set(this._drawList.slice(start, end));
+        for (const id of ids) this._drawableContainerPaths.delete(id);
+        for (const {drawables, containers} of memberships) {
+            for (const id of drawables) {
+                if (ids.has(id) && containers.length) this._drawableContainerPaths.set(id, containers.slice());
             }
         }
-        let offset = start;
-        for (let i = 0; i < destination; i++) offset += units[i].length;
-        while (destination < units.length && offset < min) offset += units[destination++].length;
-        units.splice(destination, 0, moving);
-        this._drawList.splice(start, end - start, ...[].concat(...units));
-        return this._drawList.indexOf(moving[0]);
+        const tree = this._drawableOrderTree(layer);
+        this._drawList.splice(start, end - start, ...tree.flatten());
+        this.dirty = true;
+    }
+
+    setDrawableContainerOrder (path, order, group, relative = false) {
+        const layer = this._layerGroups[group];
+        if (!layer) return null;
+        return this._setAtomicDrawableOrder(null, order, layer, relative, 0, path);
+    }
+
+    _drawableOrderTree (layer) {
+        return new DrawableOrderTree(
+            this._drawList.slice(layer.drawListOffset, this._endIndexForKnownLayerGroup(layer)),
+            this._drawableGroups, this._drawableGroupById, this._drawableContainerPaths || new Map());
+    }
+
+    _setAtomicDrawableOrder (drawableID, order, layerGroup, relative, optMin, container) {
+        const start = layerGroup.drawListOffset;
+        const end = this._endIndexForKnownLayerGroup(layerGroup);
+        const tree = this._drawableOrderTree(layerGroup);
+        const minimum = (optMin || 0) + start;
+        const min = minimum >= start && minimum < end ? minimum : start;
+        const result = tree.move(typeof container === 'string' ? tree.containers.get(container) :
+            tree.leaves.get(drawableID), order, relative, min, start);
+        if (result !== null) {
+            this._drawList.splice(start, end - start, ...tree.flatten());
+            this.dirty = true;
+        }
+        return result;
     }
 
     /**
@@ -921,6 +933,7 @@ class RenderWebGL extends EventEmitter {
             this._drawableGroupById.delete(drawableID);
         }
         this.dirty = true;
+        if (this._drawableContainerPaths) this._drawableContainerPaths.delete(drawableID);
         const drawable = this._allDrawables[drawableID];
         drawable.dispose();
         delete this._allDrawables[drawableID];
@@ -978,7 +991,8 @@ class RenderWebGL extends EventEmitter {
 
         this.dirty = true;
         const currentLayerGroup = this._layerGroups[group];
-        if (Array.from(this._drawableGroups.values()).some(owner => owner.layerGroup === group)) {
+        if ((this._drawableContainerPaths && this._drawableContainerPaths.size) ||
+            Array.from(this._drawableGroups.values()).some(owner => owner.layerGroup === group)) {
             return this._setAtomicDrawableOrder(drawableID, order, currentLayerGroup, optIsRelative, optMin);
         }
         const startIndex = currentLayerGroup.drawListOffset;
