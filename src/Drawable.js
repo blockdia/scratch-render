@@ -25,6 +25,12 @@ const FLOATING_POINT_ERROR_ALLOWANCE = 1e-6;
  * @return {twgl.v3} [x,y] texture space float vector - transformed by effects and matrix
  */
 const getLocalPosition = (drawable, vec) => {
+    const compositor = drawable._renderer._containerCompositor;
+    if (compositor && compositor.active && compositor.isPointClipped(drawable._id, vec)) {
+        __isTouchingPosition[0] = -1;
+        __isTouchingPosition[1] = -1;
+        return __isTouchingPosition;
+    }
     // Transfrom from world coordinates to Drawable coordinates.
     const localPosition = __isTouchingPosition;
     const v0 = vec[0];

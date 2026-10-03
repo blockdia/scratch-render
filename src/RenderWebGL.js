@@ -8,6 +8,7 @@ const Skin = require('./Skin');
 const BitmapSkin = require('./BitmapSkin');
 const Drawable = require('./Drawable');
 const DrawableOrderTree = require('./DrawableOrderTree');
+const ContainerCompositor = require('./ContainerCompositor');
 const Rectangle = require('./Rectangle');
 const PenSkin = require('./PenSkin');
 const RenderConstants = require('./RenderConstants');
@@ -814,6 +815,16 @@ class RenderWebGL extends EventEmitter {
         if (drawable) drawable.updateParentTransform(matrix);
     }
 
+    setDrawableContainerAppearances (states) {
+        if (!this._containerCompositor) this._containerCompositor = new ContainerCompositor(this);
+        this._containerCompositor.setStates(states);
+    }
+
+    updateDrawableContainerAppearance (id, effects, clip) {
+        if (!this._containerCompositor) this._containerCompositor = new ContainerCompositor(this);
+        this._containerCompositor.setState(id, effects, clip);
+    }
+
     _drawableOrderTree (layer) {
         return new DrawableOrderTree(
             this._drawList.slice(layer.drawListOffset, this._endIndexForKnownLayerGroup(layer)),
@@ -1101,7 +1112,10 @@ class RenderWebGL extends EventEmitter {
             const points = this._getConvexHullPointsForDrawable(drawableID);
             drawable.setConvexHullPoints(points);
         }
-        const bounds = drawable.getFastBounds();
+        let bounds = drawable.getFastBounds();
+        if (this._containerCompositor && this._containerCompositor.active) {
+            bounds = this._containerCompositor.clipBounds(drawableID, bounds);
+        }
         // In debug mode, draw the bounds.
         if (this._debugCanvas) {
             const gl = this._gl;
@@ -1229,6 +1243,9 @@ class RenderWebGL extends EventEmitter {
         const point = __isTouchingDrawablesPoint;
         const color = __touchingColor;
         const hasMask = Boolean(mask3b);
+        const compositor = this._containerCompositor && this._containerCompositor.active ?
+            this._containerCompositor : null;
+        const scene = compositor ? compositor.tree(candidates.map(candidate => candidate.id).reverse()) : null;
 
         drawable.updateCPURenderAttributes();
 
@@ -1245,9 +1262,11 @@ class RenderWebGL extends EventEmitter {
                 point[0] = x;
                 // if we use a mask, check our sample color...
                 if (hasMask ?
-                    maskMatches(Drawable.sampleColor4b(point, drawable, color, effectMask), mask3b) :
+                    maskMatches(compositor ? compositor.sampleDrawable(drawableID, point, color, effectMask) :
+                        Drawable.sampleColor4b(point, drawable, color, effectMask), mask3b) :
                     drawable.isTouching(point)) {
-                    this.sampleColor4b(point, candidates, color);
+                    if (scene) compositor.sample(scene, point, color);
+                    else this.sampleColor4b(point, candidates, color);
                     if (debugCanvasContext) {
                         debugCanvasContext.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
                         debugCanvasContext.fillRect(x - bounds.left, bounds.bottom - y, 1, 1);
@@ -1327,6 +1346,11 @@ class RenderWebGL extends EventEmitter {
                 {
                     extraUniforms,
                     ignoreVisibility: true, // Touching color ignores sprite visibility,
+                    containerSensing: true,
+                    containerTarget: {framebuffer: this._queryBufferInfo.framebuffer,
+                        viewport: [0, 0, bounds.width, bounds.height],
+                        stencil: true,
+                        colorMask: [false, false, false, false]},
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask
                 });
 
@@ -1347,7 +1371,11 @@ class RenderWebGL extends EventEmitter {
 
             // Draw the candidate drawables on top of the background.
             this._drawThese(candidateIDs, ShaderManager.DRAW_MODE.default, projection,
-                {idFilterFunc: testID => testID !== drawableID}
+                {filter: testID => testID !== drawableID,
+                    containerSensing: true,
+                    containerTarget: {framebuffer: this._queryBufferInfo.framebuffer,
+                        viewport: [0, 0, bounds.width, bounds.height],
+                        stencil: true}}
             );
         } finally {
             gl.colorMask(true, true, true, true);
@@ -1527,7 +1555,8 @@ class RenderWebGL extends EventEmitter {
                 return false;
             }
             // default pick list ignores visible and ghosted sprites.
-            if (drawable.getVisible() && drawable.getUniforms().u_ghost !== 0) {
+            if (drawable.getVisible() && drawable.getUniforms().u_ghost !== 0 &&
+                !(this._containerCompositor && this._containerCompositor.isGhosted(id))) {
                 const drawableBounds = drawable.getFastBounds();
                 const inRange = bounds.intersects(drawableBounds);
                 if (!inRange) return false;
@@ -1661,6 +1690,8 @@ class RenderWebGL extends EventEmitter {
                 {
                     // Don't apply the ghost effect. TODO: is this an intentional design decision?
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask,
+                    containerTarget: {framebuffer: bufferInfo.framebuffer,
+                        viewport: [0, 0, clampedWidth, clampedHeight]},
                     // We're doing this in screen-space, so the framebuffer dimensions should be those of the canvas in
                     // screen-space. This is used to ensure SVG skins are rendered at the proper resolution.
                     framebufferWidth: canvas.width,
@@ -1733,7 +1764,10 @@ class RenderWebGL extends EventEmitter {
             this._backgroundColor4f[3]
         );
         gl.clear(gl.COLOR_BUFFER_BIT);
-        this._drawThese(this._drawList, ShaderManager.DRAW_MODE.default, projection);
+        this._drawThese(this._drawList, ShaderManager.DRAW_MODE.default, projection, {
+            containerTarget: {framebuffer: this._queryBufferInfo.framebuffer,
+                viewport: [0, 0, bounds.width, bounds.height]}
+        });
 
         const data = new Uint8Array(Math.floor(bounds.width * bounds.height * 4));
         gl.readPixels(0, 0, bounds.width, bounds.height, gl.RGBA, gl.UNSIGNED_BYTE, data);
@@ -1779,7 +1813,8 @@ class RenderWebGL extends EventEmitter {
         /** @todo remove this once URL-based skin setting is removed. */
         if (!drawable.skin || !drawable.skin.getTexture([100, 100])) return null;
 
-        const bounds = drawable.getFastBounds();
+        const bounds = this._containerCompositor && this._containerCompositor.active ?
+            this._containerCompositor.clipBounds(drawableID, drawable.getFastBounds()) : drawable.getFastBounds();
 
         // Limit queries to the stage size.
         if (!this.offscreenTouching) {
@@ -1824,7 +1859,8 @@ class RenderWebGL extends EventEmitter {
 
                     // Update the CPU position data
                     drawable.updateCPURenderAttributes();
-                    const candidateBounds = drawable.getFastBounds();
+                    const candidateBounds = this._containerCompositor && this._containerCompositor.active ?
+                        this._containerCompositor.clipBounds(id, drawable.getFastBounds()) : drawable.getFastBounds();
 
                     // Push bounds out to integers. If a drawable extends out into half a pixel, that half-pixel still
                     // needs to be tested. Plus, in some areas we construct another rectangle from the union of these,
@@ -2119,6 +2155,9 @@ class RenderWebGL extends EventEmitter {
         // Draw the stamped sprite onto the PenSkin's framebuffer.
         this._drawThese([stampID], ShaderManager.DRAW_MODE.default, projection, {
             ignoreVisibility: true,
+            containerTarget: {framebuffer: skin._framebuffer.framebuffer,
+                viewport: [(this._nativeSize[0] * 0.5 * quality) + bounds.left,
+                    (this._nativeSize[1] * 0.5 * quality) - bounds.top, bounds.width, bounds.height]},
             framebufferWidth: this._nativeSize[0] * quality,
             framebufferHeight: this._nativeSize[1] * quality
         });
@@ -2244,6 +2283,13 @@ class RenderWebGL extends EventEmitter {
      * @private
      */
     _drawThese (drawables, drawMode, projection, opts = {}) {
+        const compositor = this._containerCompositor;
+        if (compositor && compositor.active) {
+            compositor.draw(drawables, drawMode, projection, opts);
+        } else this._drawTheseDirect(drawables, drawMode, projection, opts);
+    }
+
+    _drawTheseDirect (drawables, drawMode, projection, opts = {}) {
 
         const gl = this._gl;
         let currentShader = null;
