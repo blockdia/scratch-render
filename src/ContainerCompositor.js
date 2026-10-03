@@ -50,7 +50,7 @@ class ContainerCompositor {
             world,
             inverse: twgl.m4.inverse(world),
             enabledEffects,
-            clip: clip ? {...clip} : null,
+            clip: clip ? Object.assign({}, clip) : null,
             uniforms,
             getUniforms: () => uniforms};
         this.states.set(id, state);
@@ -109,7 +109,7 @@ class ContainerCompositor {
     // Only supplied leaves are included. In particular, never expand a component group or reinsert a query's self.
     tree (ids, sampling = true, logical = sampling) {
         const buffers = () => (sampling ? {color: new Uint8ClampedArray(4), output: new Float64Array(4)} : {});
-        const root = {children: [], ...buffers()};
+        const root = Object.assign({children: []}, buffers());
         const nodes = new Map();
         for (const id of ids) {
             let parent = root;
@@ -118,13 +118,13 @@ class ContainerCompositor {
                 if (!state || (!(state.enabledEffects & (logical ? COLOR_EFFECTS : ~0)) && !state.clip)) continue;
                 let node = nodes.get(path);
                 if (!node) {
-                    node = {state, children: [], ...buffers()};
+                    node = Object.assign({state, children: []}, buffers());
                     nodes.set(path, node);
                     parent.children.push(node);
                 }
                 parent = node;
             }
-            parent.children.push({id, ...buffers()});
+            parent.children.push(Object.assign({id}, buffers()));
         }
         return root;
     }
@@ -330,13 +330,13 @@ class ContainerCompositor {
         twgl.setTextureParameters(gl, surface.attachments[0], {
             minMag: opts.containerSensing ? gl.NEAREST : gl.LINEAR
         });
-        twgl.setUniforms(shader, {...state.uniforms,
+        twgl.setUniforms(shader, Object.assign({}, state.uniforms, {
             u_skin: surface.attachments[0],
             u_skinSize: [bounds.width, bounds.height],
             u_clipPlane: [0, 0, 1],
             u_projectionMatrix: projection,
-            u_modelMatrix: model,
-            ...opts.extraUniforms});
+            u_modelMatrix: model
+        }, opts.extraUniforms));
         twgl.drawBufferInfo(gl, this.buffer, gl.TRIANGLES);
         r._regionId = null;
     }
