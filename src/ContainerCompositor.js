@@ -109,8 +109,8 @@ class ContainerCompositor {
     // Only supplied leaves are included. In particular, never expand a component group or reinsert a query's self.
     tree (ids, sampling = true, logical = sampling) {
         const buffers = () => (sampling ? {color: new Uint8ClampedArray(4), output: new Float64Array(4)} : {});
-        const root = Object.assign({children: []}, buffers());
         const nodes = new Map();
+        const root = Object.assign({children: [], containers: nodes}, buffers());
         for (const id of ids) {
             let parent = root;
             for (const path of this.paths(id)) {
@@ -192,7 +192,36 @@ class ContainerCompositor {
         return result;
     }
 
-    _prepare (node, opts) {
+    prepare (ids, opts = {}) {
+        const tree = this.tree(ids, false, Boolean(opts.containerSensing));
+        let frames;
+        if (tree.containers.size && !opts.containerSensing && ids !== this.renderer._drawList) {
+            // A partial draw still uses the stage's effect frames. Only requested
+            // leaves enter the output; siblings contribute bounds, never pixels.
+            const selected = new Set(ids.filter(id => !opts.filter || opts.filter(id)));
+            const scene = this.tree(this.renderer._drawList, false, false);
+            this._prepare(scene, Object.assign({}, opts, {
+                filter: id => this.renderer._allDrawables[id].getVisible() || selected.has(id)
+            }));
+            frames = scene.containers;
+        }
+        this._prepare(tree, opts, frames);
+        return tree;
+    }
+
+    expandBounds (tree, bounds) {
+        // Warps can move the selected member anywhere within a container's frame.
+        // Extraction and stamping must retain those pixels outside its own bounds.
+        for (const node of tree.containers.values()) {
+            if (!node.bounds || !(node.state.enabledEffects & ~COLOR_EFFECTS)) continue;
+            const frame = new Rectangle();
+            frame.initFromPointsAABB(corners(node.bounds).map(p => point(node.state.world, p[0], p[1])));
+            Rectangle.union(bounds, frame, bounds);
+        }
+        return bounds;
+    }
+
+    _prepare (node, opts, frames) {
         if (typeof node.id === 'number') {
             const drawable = this.renderer._allDrawables[node.id];
             if (!drawable || !drawable.skin || (!opts.ignoreVisibility && !drawable.getVisible()) ||
@@ -204,16 +233,21 @@ class ContainerCompositor {
             return node.corners;
         }
         const points = [];
-        for (const child of node.children) points.push(...this._prepare(child, opts));
+        for (const child of node.children) points.push(...this._prepare(child, opts, frames));
         if (!node.state || !points.length) return points;
-        const bounds = new Rectangle();
-        bounds.initFromPointsAABB(points.map(p => point(node.state.inverse, p[0], p[1])));
-        if (node.state.clip) {
-            // An explicit clip is also a stable effect frame in container-local Scratch units.
-            Object.assign(bounds, node.state.clip);
+        const frame = frames && frames.get(node.state.id);
+        if (frame && frame.bounds) {
+            node.bounds = frame.bounds;
+        } else {
+            const bounds = new Rectangle();
+            bounds.initFromPointsAABB(points.map(p => point(node.state.inverse, p[0], p[1])));
+            if (node.state.clip) {
+                // An explicit clip is also a stable effect frame in container-local Scratch units.
+                Object.assign(bounds, node.state.clip);
+            }
+            node.bounds = bounds;
         }
-        node.bounds = bounds;
-        return corners(bounds).map(p => point(node.state.world, p[0], p[1]));
+        return corners(node.bounds).map(p => point(node.state.world, p[0], p[1]));
     }
 
     _surface (depth, width, height) {
@@ -257,8 +291,7 @@ class ContainerCompositor {
     draw (ids, mode, projection, opts) {
         const r = this.renderer;
         const gl = r.gl;
-        const tree = this.tree(ids, false, Boolean(opts.containerSensing));
-        this._prepare(tree, opts);
+        const tree = opts.containerTree || this.prepare(ids, opts);
         const target = opts.containerTarget || {framebuffer: null, viewport: [0, 0, gl.canvas.width, gl.canvas.height]};
         this.usedDepth = 0;
         r._doExitDrawRegion();

@@ -1633,6 +1633,9 @@ class RenderWebGL extends EventEmitter {
         for (const id of drawableIDs) {
             Rectangle.union(scratchBounds, this._allDrawables[id].getFastBounds(), scratchBounds);
         }
+        const compositor = this._containerCompositor;
+        const containerTree = compositor && compositor.active ? compositor.prepare(drawableIDs) : null;
+        if (containerTree) compositor.expandBounds(containerTree, scratchBounds);
 
         const canvas = this.canvas;
         // Ratio of the screen-space scale of the stage's canvas to the "native size" of the stage
@@ -1690,6 +1693,7 @@ class RenderWebGL extends EventEmitter {
                 {
                     // Don't apply the ghost effect. TODO: is this an intentional design decision?
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask,
+                    containerTree,
                     containerTarget: {framebuffer: bufferInfo.framebuffer,
                         viewport: [0, 0, clampedWidth, clampedHeight]},
                     // We're doing this in screen-space, so the framebuffer dimensions should be those of the canvas in
@@ -2111,6 +2115,11 @@ class RenderWebGL extends EventEmitter {
         }
 
         const bounds = stampDrawable.getFastBounds();
+        const drawableIDs = [stampID];
+        const compositor = this._containerCompositor;
+        const containerTree = compositor && compositor.active ?
+            compositor.prepare(drawableIDs, {ignoreVisibility: true}) : null;
+        if (containerTree) compositor.expandBounds(containerTree, bounds);
         // Ideally we wouldn't need to check offscreenTouching at all here, but the camera extensions
         // do too many crazy things to risk changing this control flow.
         if (!this.offscreenTouching) {
@@ -2153,8 +2162,9 @@ class RenderWebGL extends EventEmitter {
         );
 
         // Draw the stamped sprite onto the PenSkin's framebuffer.
-        this._drawThese([stampID], ShaderManager.DRAW_MODE.default, projection, {
+        this._drawThese(drawableIDs, ShaderManager.DRAW_MODE.default, projection, {
             ignoreVisibility: true,
+            containerTree,
             containerTarget: {framebuffer: skin._framebuffer.framebuffer,
                 viewport: [(this._nativeSize[0] * 0.5 * quality) + bounds.left,
                     (this._nativeSize[1] * 0.5 * quality) - bounds.top, bounds.width, bounds.height]},

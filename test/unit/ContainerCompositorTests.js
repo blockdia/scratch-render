@@ -104,3 +104,54 @@ test('ancestor clips remain precise under rotation, for both same and cross cont
     t.ok(a.isTouching([0, 5]), 'removing clip immediately restores sensing');
     t.end();
 });
+
+
+test('partial visual draws retain full effect frames while excluding sibling pixels', t => {
+    const {r, add, compositor} = fixture();
+    const a = add(['A', 'N'], [255, 0, 0], -10);
+    const b = add(['A', 'N'], [0, 0, 255], 10);
+    add(['A'], [0, 255, 0], 50);
+    add([], [0, 0, 0], 100);
+    r.setDrawableContainerAppearances([
+        {id: 'A', effects: {whirl: 50}},
+        {id: 'N', effects: {mosaic: 10}}
+    ]);
+    const tree = compositor.prepare([a._id]);
+    t.same(tree.containers.get('N').bounds, compositor.prepare(r._drawList).containers.get('N').bounds);
+    t.equal(tree.containers.get('N').bounds.left, -20);
+    t.equal(tree.containers.get('N').bounds.right, 20);
+    t.equal(tree.containers.get('A').bounds.right, 60, 'outer frame includes its other visible members');
+    t.same(tree.containers.get('N').children.map(node => node.id), [a._id], 'only the selected leaf is drawn');
+    const bounds = compositor.expandBounds(tree, a.getAABB());
+    t.equal(bounds.left, -20);
+    t.equal(bounds.right, 60, 'output bounds include displaced pixels from both warps');
+    b.updatePosition([30, 0]);
+    t.equal(compositor.prepare([a._id]).containers.get('N').bounds.right, 40, 'frames follow current positions');
+    b.updateVisible(false);
+    t.ok(Math.abs(compositor.prepare([a._id]).containers.get('N').bounds.right) < 1e-8,
+        'hidden siblings do not enlarge frames');
+    a.updateVisible(false);
+    t.ok(Math.abs(compositor.prepare([a._id], {ignoreVisibility: true}).containers.get('N').bounds.right) < 1e-8,
+        'stamping includes the hidden selected leaf but not other hidden siblings');
+    t.end();
+});
+
+test('partial visual frames preserve transformed clips without expanding logical queries', t => {
+    const {r, add, compositor} = fixture();
+    const a = add(['A'], [255, 0, 0]);
+    add(['A'], [0, 0, 255], 100);
+    const clip = {left: -20, right: 40, bottom: -10, top: 10};
+    r.setDrawableContainerAppearances([{id: 'A', matrix: [0, 1, -1, 0, 50, 0], effects: {mosaic: 10}, clip}]);
+    const tree = compositor.prepare([a._id]);
+    t.same({...tree.containers.get('A').bounds}, clip, 'explicit local clip remains the effect frame');
+    const bounds = compositor.expandBounds(tree, a.getAABB());
+    t.equal(bounds.right, 60, 'warped output includes the transformed frame');
+    t.equal(bounds.top, 40);
+    r.updateDrawableContainerAppearance('A', {mosaic: 10}, null);
+    const logical = compositor.prepare([a._id], {containerSensing: true});
+    t.equal(logical.containers.size, 0, 'logical masks still ignore visual warps');
+    r.updateDrawableContainerAppearance('A', {ghost: 50}, null);
+    t.same(compositor.expandBounds(compositor.prepare([a._id]), a.getAABB()), a.getAABB(),
+        'color-only effects retain the tight member bounds');
+    t.end();
+});
