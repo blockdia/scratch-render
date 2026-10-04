@@ -7,6 +7,8 @@ const SVGRenderer = require('@blockdia/scratch-svg-renderer');
 const Skin = require('./Skin');
 const BitmapSkin = require('./BitmapSkin');
 const Drawable = require('./Drawable');
+const DrawableOrderTree = require('./DrawableOrderTree');
+const ContainerCompositor = require('./ContainerCompositor');
 const Rectangle = require('./Rectangle');
 const PenSkin = require('./PenSkin');
 const RenderConstants = require('./RenderConstants');
@@ -195,6 +197,7 @@ class RenderWebGL extends EventEmitter {
         this._drawableGroups = new Map();
         this._drawableGroupById = new Map();
         this._nextDrawableGroupId = 0;
+        this._drawableContainerPaths = new Map();
 
         // A list of layer group names in the order they should appear
         // from furthest back to furthest in front.
@@ -782,40 +785,65 @@ class RenderWebGL extends EventEmitter {
         return group ? this.setDrawableOrder(group.drawables[0], order, group.layerGroup, relative, min) : null;
     }
 
-    _setAtomicDrawableOrder (drawableID, order, layerGroup, relative, optMin) {
-        const start = layerGroup.drawListOffset;
-        const end = this._endIndexForKnownLayerGroup(layerGroup);
-        const units = [];
-        for (let i = start; i < end;) {
-            const id = this._drawList[i];
-            const group = this._drawableGroups.get(this._drawableGroupById.get(id));
-            const members = group ? group.drawables.slice() : [id];
-            units.push(members);
-            i += members.length;
-        }
-        const oldUnit = units.findIndex(ids => ids.includes(drawableID));
-        if (oldUnit < 0) return null;
-        const oldIndex = this._drawList.indexOf(units[oldUnit][0]);
-        if (order === 0) return oldIndex;
-        const moving = units.splice(oldUnit, 1)[0];
-        const minimum = (optMin || 0) + start;
-        const min = minimum >= start && minimum < end ? minimum : start;
-        let destination;
-        if (relative) {
-            destination = Math.max(0, Math.min(units.length, oldUnit + Math.trunc(order)));
-        } else {
-            destination = 0;
-            let offset = start;
-            while (destination < units.length && offset < order) {
-                offset += units[destination++].length;
+    // Replace membership for one scene layer, then make every subtree contiguous.
+    setDrawableContainerPaths (group, memberships) {
+        const layer = this._layerGroups[group];
+        if (!layer) return;
+        if (!this._drawableContainerPaths) this._drawableContainerPaths = new Map();
+        const start = layer.drawListOffset;
+        const end = this._endIndexForKnownLayerGroup(layer);
+        const ids = new Set(this._drawList.slice(start, end));
+        for (const id of ids) this._drawableContainerPaths.delete(id);
+        for (const {drawables, containers} of memberships) {
+            for (const id of drawables) {
+                if (ids.has(id) && containers.length) this._drawableContainerPaths.set(id, containers.slice());
             }
         }
-        let offset = start;
-        for (let i = 0; i < destination; i++) offset += units[i].length;
-        while (destination < units.length && offset < min) offset += units[destination++].length;
-        units.splice(destination, 0, moving);
-        this._drawList.splice(start, end - start, ...[].concat(...units));
-        return this._drawList.indexOf(moving[0]);
+        const tree = this._drawableOrderTree(layer);
+        this._drawList.splice(start, end - start, ...tree.flatten());
+        this.dirty = true;
+    }
+
+    setDrawableContainerOrder (path, order, group, relative = false) {
+        const layer = this._layerGroups[group];
+        if (!layer) return null;
+        return this._setAtomicDrawableOrder(null, order, layer, relative, 0, path);
+    }
+
+    updateDrawableParentTransform (drawableID, matrix) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateParentTransform(matrix);
+    }
+
+    setDrawableContainerAppearances (states) {
+        if (!this._containerCompositor) this._containerCompositor = new ContainerCompositor(this);
+        this._containerCompositor.setStates(states);
+    }
+
+    updateDrawableContainerAppearance (id, effects, clip) {
+        if (!this._containerCompositor) this._containerCompositor = new ContainerCompositor(this);
+        this._containerCompositor.setState(id, effects, clip);
+    }
+
+    _drawableOrderTree (layer) {
+        return new DrawableOrderTree(
+            this._drawList.slice(layer.drawListOffset, this._endIndexForKnownLayerGroup(layer)),
+            this._drawableGroups, this._drawableGroupById, this._drawableContainerPaths || new Map());
+    }
+
+    _setAtomicDrawableOrder (drawableID, order, layerGroup, relative, optMin, container) {
+        const start = layerGroup.drawListOffset;
+        const end = this._endIndexForKnownLayerGroup(layerGroup);
+        const tree = this._drawableOrderTree(layerGroup);
+        const minimum = (optMin || 0) + start;
+        const min = minimum >= start && minimum < end ? minimum : start;
+        const result = tree.move(typeof container === 'string' ? tree.containers.get(container) :
+            tree.leaves.get(drawableID), order, relative, min, start);
+        if (result !== null) {
+            this._drawList.splice(start, end - start, ...tree.flatten());
+            this.dirty = true;
+        }
+        return result;
     }
 
     /**
@@ -921,6 +949,7 @@ class RenderWebGL extends EventEmitter {
             this._drawableGroupById.delete(drawableID);
         }
         this.dirty = true;
+        if (this._drawableContainerPaths) this._drawableContainerPaths.delete(drawableID);
         const drawable = this._allDrawables[drawableID];
         drawable.dispose();
         delete this._allDrawables[drawableID];
@@ -978,7 +1007,8 @@ class RenderWebGL extends EventEmitter {
 
         this.dirty = true;
         const currentLayerGroup = this._layerGroups[group];
-        if (Array.from(this._drawableGroups.values()).some(owner => owner.layerGroup === group)) {
+        if ((this._drawableContainerPaths && this._drawableContainerPaths.size) ||
+            Array.from(this._drawableGroups.values()).some(owner => owner.layerGroup === group)) {
             return this._setAtomicDrawableOrder(drawableID, order, currentLayerGroup, optIsRelative, optMin);
         }
         const startIndex = currentLayerGroup.drawListOffset;
@@ -1082,7 +1112,10 @@ class RenderWebGL extends EventEmitter {
             const points = this._getConvexHullPointsForDrawable(drawableID);
             drawable.setConvexHullPoints(points);
         }
-        const bounds = drawable.getFastBounds();
+        let bounds = drawable.getFastBounds();
+        if (this._containerCompositor && this._containerCompositor.active) {
+            bounds = this._containerCompositor.clipBounds(drawableID, bounds);
+        }
         // In debug mode, draw the bounds.
         if (this._debugCanvas) {
             const gl = this._gl;
@@ -1210,6 +1243,9 @@ class RenderWebGL extends EventEmitter {
         const point = __isTouchingDrawablesPoint;
         const color = __touchingColor;
         const hasMask = Boolean(mask3b);
+        const compositor = this._containerCompositor && this._containerCompositor.active ?
+            this._containerCompositor : null;
+        const scene = compositor ? compositor.tree(candidates.map(candidate => candidate.id).reverse()) : null;
 
         drawable.updateCPURenderAttributes();
 
@@ -1226,9 +1262,11 @@ class RenderWebGL extends EventEmitter {
                 point[0] = x;
                 // if we use a mask, check our sample color...
                 if (hasMask ?
-                    maskMatches(Drawable.sampleColor4b(point, drawable, color, effectMask), mask3b) :
+                    maskMatches(compositor ? compositor.sampleDrawable(drawableID, point, color, effectMask) :
+                        Drawable.sampleColor4b(point, drawable, color, effectMask), mask3b) :
                     drawable.isTouching(point)) {
-                    this.sampleColor4b(point, candidates, color);
+                    if (scene) compositor.sample(scene, point, color);
+                    else this.sampleColor4b(point, candidates, color);
                     if (debugCanvasContext) {
                         debugCanvasContext.fillStyle = `rgb(${color[0]},${color[1]},${color[2]})`;
                         debugCanvasContext.fillRect(x - bounds.left, bounds.bottom - y, 1, 1);
@@ -1308,6 +1346,11 @@ class RenderWebGL extends EventEmitter {
                 {
                     extraUniforms,
                     ignoreVisibility: true, // Touching color ignores sprite visibility,
+                    containerSensing: true,
+                    containerTarget: {framebuffer: this._queryBufferInfo.framebuffer,
+                        viewport: [0, 0, bounds.width, bounds.height],
+                        stencil: true,
+                        colorMask: [false, false, false, false]},
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask
                 });
 
@@ -1328,7 +1371,11 @@ class RenderWebGL extends EventEmitter {
 
             // Draw the candidate drawables on top of the background.
             this._drawThese(candidateIDs, ShaderManager.DRAW_MODE.default, projection,
-                {idFilterFunc: testID => testID !== drawableID}
+                {filter: testID => testID !== drawableID,
+                    containerSensing: true,
+                    containerTarget: {framebuffer: this._queryBufferInfo.framebuffer,
+                        viewport: [0, 0, bounds.width, bounds.height],
+                        stencil: true}}
             );
         } finally {
             gl.colorMask(true, true, true, true);
@@ -1508,7 +1555,8 @@ class RenderWebGL extends EventEmitter {
                 return false;
             }
             // default pick list ignores visible and ghosted sprites.
-            if (drawable.getVisible() && drawable.getUniforms().u_ghost !== 0) {
+            if (drawable.getVisible() && drawable.getUniforms().u_ghost !== 0 &&
+                !(this._containerCompositor && this._containerCompositor.isGhosted(id))) {
                 const drawableBounds = drawable.getFastBounds();
                 const inRange = bounds.intersects(drawableBounds);
                 if (!inRange) return false;
@@ -1585,6 +1633,9 @@ class RenderWebGL extends EventEmitter {
         for (const id of drawableIDs) {
             Rectangle.union(scratchBounds, this._allDrawables[id].getFastBounds(), scratchBounds);
         }
+        const compositor = this._containerCompositor;
+        const containerTree = compositor && compositor.active ? compositor.prepare(drawableIDs) : null;
+        if (containerTree) compositor.expandBounds(containerTree, scratchBounds);
 
         const canvas = this.canvas;
         // Ratio of the screen-space scale of the stage's canvas to the "native size" of the stage
@@ -1642,6 +1693,9 @@ class RenderWebGL extends EventEmitter {
                 {
                     // Don't apply the ghost effect. TODO: is this an intentional design decision?
                     effectMask: ~ShaderManager.EFFECT_INFO.ghost.mask,
+                    containerTree,
+                    containerTarget: {framebuffer: bufferInfo.framebuffer,
+                        viewport: [0, 0, clampedWidth, clampedHeight]},
                     // We're doing this in screen-space, so the framebuffer dimensions should be those of the canvas in
                     // screen-space. This is used to ensure SVG skins are rendered at the proper resolution.
                     framebufferWidth: canvas.width,
@@ -1714,7 +1768,10 @@ class RenderWebGL extends EventEmitter {
             this._backgroundColor4f[3]
         );
         gl.clear(gl.COLOR_BUFFER_BIT);
-        this._drawThese(this._drawList, ShaderManager.DRAW_MODE.default, projection);
+        this._drawThese(this._drawList, ShaderManager.DRAW_MODE.default, projection, {
+            containerTarget: {framebuffer: this._queryBufferInfo.framebuffer,
+                viewport: [0, 0, bounds.width, bounds.height]}
+        });
 
         const data = new Uint8Array(Math.floor(bounds.width * bounds.height * 4));
         gl.readPixels(0, 0, bounds.width, bounds.height, gl.RGBA, gl.UNSIGNED_BYTE, data);
@@ -1760,7 +1817,8 @@ class RenderWebGL extends EventEmitter {
         /** @todo remove this once URL-based skin setting is removed. */
         if (!drawable.skin || !drawable.skin.getTexture([100, 100])) return null;
 
-        const bounds = drawable.getFastBounds();
+        const bounds = this._containerCompositor && this._containerCompositor.active ?
+            this._containerCompositor.clipBounds(drawableID, drawable.getFastBounds()) : drawable.getFastBounds();
 
         // Limit queries to the stage size.
         if (!this.offscreenTouching) {
@@ -1805,7 +1863,8 @@ class RenderWebGL extends EventEmitter {
 
                     // Update the CPU position data
                     drawable.updateCPURenderAttributes();
-                    const candidateBounds = drawable.getFastBounds();
+                    const candidateBounds = this._containerCompositor && this._containerCompositor.active ?
+                        this._containerCompositor.clipBounds(id, drawable.getFastBounds()) : drawable.getFastBounds();
 
                     // Push bounds out to integers. If a drawable extends out into half a pixel, that half-pixel still
                     // needs to be tested. Plus, in some areas we construct another rectangle from the union of these,
@@ -1977,24 +2036,29 @@ class RenderWebGL extends EventEmitter {
             return [x, y];
         }
 
-        const dx = x - drawable._position[0];
-        const dy = y - drawable._position[1];
+        const p = drawable._parentTransform;
+        [x, y] = [(p[0] * x) + (p[2] * y) + p[4], (p[1] * x) + (p[3] * y) + p[5]];
+        const current = drawable.getWorldPosition();
+        const dx = x - current[0];
+        const dy = y - current[1];
         const aabb = drawable._skin.getFenceBounds(drawable, __fenceBounds);
         const inset = Math.floor(Math.min(aabb.width, aabb.height) / 2);
 
         const sx = this._xRight - Math.min(FENCE_WIDTH, inset);
         if (aabb.right + dx < -sx) {
-            x = Math.ceil(drawable._position[0] - (sx + aabb.right));
+            x = Math.ceil(current[0] - (sx + aabb.right));
         } else if (aabb.left + dx > sx) {
-            x = Math.floor(drawable._position[0] + (sx - aabb.left));
+            x = Math.floor(current[0] + (sx - aabb.left));
         }
         const sy = this._yTop - Math.min(FENCE_WIDTH, inset);
         if (aabb.top + dy < -sy) {
-            y = Math.ceil(drawable._position[1] - (sy + aabb.top));
+            y = Math.ceil(current[1] - (sy + aabb.top));
         } else if (aabb.bottom + dy > sy) {
-            y = Math.floor(drawable._position[1] + (sy - aabb.bottom));
+            y = Math.floor(current[1] + (sy - aabb.bottom));
         }
-        return [x, y];
+        const det = (p[0] * p[3]) - (p[1] * p[2]);
+        return [((p[3] * (x - p[4])) - (p[2] * (y - p[5]))) / det,
+            ((p[0] * (y - p[5])) - (p[1] * (x - p[4]))) / det];
     }
 
     /**
@@ -2051,6 +2115,11 @@ class RenderWebGL extends EventEmitter {
         }
 
         const bounds = stampDrawable.getFastBounds();
+        const drawableIDs = [stampID];
+        const compositor = this._containerCompositor;
+        const containerTree = compositor && compositor.active ?
+            compositor.prepare(drawableIDs, {ignoreVisibility: true}) : null;
+        if (containerTree) compositor.expandBounds(containerTree, bounds);
         // Ideally we wouldn't need to check offscreenTouching at all here, but the camera extensions
         // do too many crazy things to risk changing this control flow.
         if (!this.offscreenTouching) {
@@ -2093,8 +2162,12 @@ class RenderWebGL extends EventEmitter {
         );
 
         // Draw the stamped sprite onto the PenSkin's framebuffer.
-        this._drawThese([stampID], ShaderManager.DRAW_MODE.default, projection, {
+        this._drawThese(drawableIDs, ShaderManager.DRAW_MODE.default, projection, {
             ignoreVisibility: true,
+            containerTree,
+            containerTarget: {framebuffer: skin._framebuffer.framebuffer,
+                viewport: [(this._nativeSize[0] * 0.5 * quality) + bounds.left,
+                    (this._nativeSize[1] * 0.5 * quality) - bounds.top, bounds.width, bounds.height]},
             framebufferWidth: this._nativeSize[0] * quality,
             framebufferHeight: this._nativeSize[1] * quality
         });
@@ -2220,6 +2293,13 @@ class RenderWebGL extends EventEmitter {
      * @private
      */
     _drawThese (drawables, drawMode, projection, opts = {}) {
+        const compositor = this._containerCompositor;
+        if (compositor && compositor.active) {
+            compositor.draw(drawables, drawMode, projection, opts);
+        } else this._drawTheseDirect(drawables, drawMode, projection, opts);
+    }
+
+    _drawTheseDirect (drawables, drawMode, projection, opts = {}) {
 
         const gl = this._gl;
         let currentShader = null;

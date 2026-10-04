@@ -25,6 +25,12 @@ const FLOATING_POINT_ERROR_ALLOWANCE = 1e-6;
  * @return {twgl.v3} [x,y] texture space float vector - transformed by effects and matrix
  */
 const getLocalPosition = (drawable, vec) => {
+    const compositor = drawable._renderer._containerCompositor;
+    if (compositor && compositor.active && compositor.isPointClipped(drawable._id, vec)) {
+        __isTouchingPosition[0] = -1;
+        __isTouchingPosition[1] = -1;
+        return __isTouchingPosition;
+    }
     // Transfrom from world coordinates to Drawable coordinates.
     const localPosition = __isTouchingPosition;
     const v0 = vec[0];
@@ -102,6 +108,10 @@ class Drawable {
         }
 
         this._position = twgl.v3.create(0, 0);
+        this._unroundedPosition = [0, 0];
+        this._parentTransform = [1, 0, 0, 1, 0, 0];
+        this._parentScale = 1;
+        this._hasParentTransform = false;
         this._scale = twgl.v3.create(100, 100);
         this._direction = 90;
         this._transformDirty = true;
@@ -194,7 +204,31 @@ class Drawable {
      * @returns {Array<number>} the current scaling percentages applied to this Drawable. [100,100] is normal size.
      */
     get scale () {
-        return [this._scale[0], this._scale[1]];
+        return [this._scale[0] * this._parentScale, this._scale[1] * this._parentScale];
+    }
+
+    updateParentTransform (matrix) {
+        if (!Array.isArray(matrix) || matrix.length !== 6 || !matrix.every(Number.isFinite)) {
+            throw new Error('Invalid drawable parent transform');
+        }
+        if (matrix.every((n, i) => n === this._parentTransform[i])) return;
+        this._parentTransform = matrix.slice();
+        this._hasParentTransform = matrix.some((n, i) => n !== (i === 0 || i === 3 ? 1 : 0));
+        // Rounding local coordinates can become a large world-space jump when a
+        // parent scales them. Restore the requested position before composing it.
+        this.updatePosition(this._unroundedPosition);
+        // sqrt(norm1 * normInfinity) bounds the maximum stretch, including shear.
+        this._parentScale = Math.sqrt(
+            Math.max(Math.abs(matrix[0]) + Math.abs(matrix[1]), Math.abs(matrix[2]) + Math.abs(matrix[3])) *
+            Math.max(Math.abs(matrix[0]) + Math.abs(matrix[2]), Math.abs(matrix[1]) + Math.abs(matrix[3])));
+        this.setTransformDirty();
+        this._renderer.dirty = true;
+    }
+
+    getWorldPosition () {
+        const p = this._parentTransform;
+        return [(p[0] * this._position[0]) + (p[2] * this._position[1]) + p[4],
+            (p[1] * this._position[0]) + (p[3] * this._position[1]) + p[5]];
     }
 
     /**
@@ -264,15 +298,14 @@ class Drawable {
      * @param {Array.<number>} position A new position.
      */
     updatePosition (position) {
-        if (this._position[0] !== position[0] ||
-            this._position[1] !== position[1]) {
-            if (this._highQuality) {
-                this._position[0] = position[0];
-                this._position[1] = position[1];
-            } else {
-                this._position[0] = Math.round(position[0]);
-                this._position[1] = Math.round(position[1]);
-            }
+        this._unroundedPosition[0] = position[0];
+        this._unroundedPosition[1] = position[1];
+        const precise = this._highQuality || this._hasParentTransform;
+        const x = precise ? position[0] : Math.round(position[0]);
+        const y = precise ? position[1] : Math.round(position[1]);
+        if (this._position[0] !== x || this._position[1] !== y) {
+            this._position[0] = x;
+            this._position[1] = y;
             this._renderer.dirty = true;
             this.setTransformDirty();
         }
@@ -507,6 +540,13 @@ class Drawable {
         // modelMatrix[14] = 0;
         // modelMatrix[15] = 1;
 
+        const p = this._parentTransform;
+        for (const offset of [0, 4, 12]) {
+            const x = modelMatrix[offset];
+            const y = modelMatrix[offset + 1];
+            modelMatrix[offset] = (p[0] * x) + (p[2] * y) + (offset === 12 ? p[4] : 0);
+            modelMatrix[offset + 1] = (p[1] * x) + (p[3] * y) + (offset === 12 ? p[5] : 0);
+        }
         this._transformDirty = false;
     }
 
@@ -711,11 +751,12 @@ class Drawable {
     updateCPURenderAttributes () {
         this.updateMatrix();
         this._updateClipUniform();
-        // CPU rendering always occurs at the "native" size, so no need to scale up this._scale
+        // Include parent scaling so CPU sensing uses the same skin resolution as drawing.
         if (this.skin) {
-            this.skin.updateSilhouette(this._scale);
+            const scale = this.scale;
+            this.skin.updateSilhouette(scale);
 
-            if (this.skin.useNearest(this._scale, this)) {
+            if (this.skin.useNearest(scale, this)) {
                 this.isTouching = this._isTouchingNearest;
             } else {
                 this.isTouching = this._isTouchingLinear;

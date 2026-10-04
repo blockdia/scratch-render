@@ -9,6 +9,9 @@ global.document = {
 const Drawable = require('../../src/Drawable');
 const MockSkin = require('../fixtures/MockSkin');
 const Rectangle = require('../../src/Rectangle');
+const twgl = require('twgl.js');
+const RenderWebGL = require('../../src/RenderWebGL');
+const SVGSkin = require('../../src/SVGSkin');
 
 /**
  * Returns a Rectangle-like object, with dimensions rounded to the given number
@@ -202,5 +205,73 @@ test('clip changes invalidate rendering without unrelated drawable updates', t =
         drawable.updateClipPlane(plane);
         t.notOk(renderer.dirty, 'unchanged clipping does not request a redraw');
     }
+    t.end();
+});
+
+
+test('parent affine transforms compose with local bounds and CPU inverse matrices', t => {
+    const drawable = new Drawable(1, {});
+    drawable.skin = new MockSkin(0, mockRenderer(drawable));
+    drawable.skin.size = [20, 10];
+    drawable.updatePosition([10, 20]);
+    // Clockwise 90 degrees, 200% horizontally, 100% vertically, offset [100, 50].
+    drawable.updateParentTransform([0, -2, 1, 0, 100, 50]);
+    t.same(drawable.getWorldPosition(), [120, 30]);
+    t.same(snapToNearest(drawable.getAABB()), {left: '110.000',
+        right: '120.000',
+        bottom: '-10.000',
+        top: '30.000'});
+    drawable.updateMatrix();
+    const center = twgl.m4.transformPoint(drawable._uniforms.u_modelMatrix, [0, 0, 0]);
+    const local = twgl.m4.transformPoint(drawable._inverseMatrix, center);
+    t.ok(Math.abs(local[0]) < 1e-6 && Math.abs(local[1]) < 1e-6);
+    drawable.updatePosition([20, 30]);
+    t.same(drawable.getWorldPosition(), [130, 10], 'local motion keeps the parent transform');
+    drawable.updateParentTransform([1, 0, 0, 1, 0, 0]);
+    t.same(drawable.getWorldPosition(), [20, 30]);
+    t.same(drawable.scale, [100, 100]);
+    t.end();
+});
+
+
+test('fencing uses world bounds and returns local coordinates under mirrored parents', t => {
+    const renderer = Object.create(RenderWebGL.prototype);
+    Object.assign(renderer, {_allDrawables: [], _xRight: 240, _yTop: 180});
+    const drawable = new Drawable(0, renderer);
+    renderer._allDrawables[0] = drawable;
+    drawable.skin = new MockSkin(0, mockRenderer(drawable));
+    drawable.skin.size = [20, 10];
+    drawable.skin.rotationCenter = [10, 5];
+    drawable.updateParentTransform([0, -2, -1, 0, 100, 50]);
+    const local = renderer.getFencedPositionOfDrawable(0, [1000, -1000]);
+    drawable.updatePosition(local);
+    const world = drawable.getWorldPosition();
+    const bounds = drawable.getAABB();
+    t.ok(bounds.left <= 235 && bounds.top >= -175, 'some of the sprite remains inside the stage');
+    t.ok(world[0] <= 240 && world[1] >= -195);
+    t.ok(Math.abs(local[0]) < 1000 && Math.abs(local[1]) < 1000);
+    t.end();
+});
+
+test('parent shear and nonuniform scale cannot select nearest filtering from a texture-size estimate', t => {
+    const drawable = new Drawable(0, {});
+    t.ok(SVGSkin.prototype.useNearest(drawable.scale, drawable));
+    drawable.updateParentTransform([1, 0, 0, 0.5, 0, 0]);
+    t.notOk(SVGSkin.prototype.useNearest(drawable.scale, drawable));
+    drawable.updateParentTransform([0.5, 0.5, -0.5, 0.5, 0, 0]);
+    t.notOk(SVGSkin.prototype.useNearest(drawable.scale, drawable));
+    t.end();
+});
+
+test('parent transforms preserve fractional local positions even with low-quality rendering', t => {
+    const drawable = new Drawable(0, {});
+    drawable.updatePosition([0.25, -0.25]);
+    t.same(drawable.getWorldPosition(), [0, 0], 'ordinary sprites retain pixel rounding');
+    drawable.updateParentTransform([100, 0, 0, 100, 0, 0]);
+    t.same(drawable.getWorldPosition(), [25, -25], 'adding a parent restores exact local coordinates');
+    drawable.updatePosition([0.125, -0.125]);
+    t.same(drawable.getWorldPosition(), [12.5, -12.5]);
+    drawable.updateParentTransform([1, 0, 0, 1, 0, 0]);
+    t.same(drawable.getWorldPosition(), [0, 0], 'removing the parent restores ordinary rendering');
     t.end();
 });
