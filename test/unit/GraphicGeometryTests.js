@@ -2,6 +2,7 @@ const test = require('tap').test;
 const Drawable = require('../../src/Drawable');
 const MockSkin = require('../fixtures/MockSkin');
 const RenderWebGL = require('../../src/RenderWebGL');
+const twgl = require('twgl.js');
 
 const fixture = () => {
     const renderer = Object.create(RenderWebGL.prototype);
@@ -101,5 +102,66 @@ test('container shapes share point semantics, with conservative inverse bounds',
     t.notOk(d.isTouching([45, 29]), 'outside transformed ellipse');
     const bounds = renderer._containerCompositor.clipBounds(0, d.getAABB());
     t.ok(bounds.width > 20 && bounds.height > 20, 'inverse does not crop to the removed region');
+    t.end();
+});
+
+test('projective corners, inverse picking and stage clipping use homogeneous coordinates', t => {
+    const {d, renderer} = fixture();
+    d.updatePerspective({frame: null, corners: [[20, 0], [-20, 0], [0, 0], [0, 0]]});
+    d.updateCPURenderAttributes();
+    const project = (x, y) => Array.from(twgl.m4.transformPoint(d._uniforms.u_modelMatrix,
+        [0.5 - ((x + 50) / 100), ((30 - y) / 60) - 0.5, 0]));
+    const topLeft = project(-50, 30);
+    t.ok(Math.abs(topLeft[0] + 30) < 0.001 && Math.abs(topLeft[1] - 30) < 0.001);
+    const center = project(0, 0);
+    t.ok(Math.abs(center[1] - 7.5) < 0.001, 'center uses perspective-correct interpolation');
+    t.ok(d.isTouching([0, 0]));
+    t.notOk(d.isTouching([45, 25]), 'original rectangular corner no longer hits');
+    const local = renderer.getDrawableLocalPosition(0, ...center);
+    t.ok(local.every(n => Math.abs(n) < 0.001), 'component pointer can undo the projective transform');
+    const bounds = d.getAABB();
+    t.ok(Math.abs(bounds.left + 50) < 0.001 && Math.abs(bounds.right - 50) < 0.001);
+    d.updateClipShape({space: 'stage', left: -5, right: 5, bottom: -5, top: 5});
+    d.updateCPURenderAttributes();
+    t.ok(d.isTouching([0, 0]));
+    t.notOk(d.isTouching([0, -10]), 'stage clip divides by homogeneous w');
+    d.updatePerspective(null);
+    d.updateClipShape(null);
+    d.updateCPURenderAttributes();
+    t.ok(d.isTouching([45, 25]), 'clear restores the original affine matrix');
+    t.equal(d._uniforms.u_modelMatrix[15], 1);
+    t.end();
+});
+
+test('costume alpha and luminance masks affect collision and premultiplied CPU colors independently of shapes', t => {
+    const {d, renderer} = fixture();
+    renderer._allSkins = [];
+    const mask = new MockSkin(1, {skinWasAltered: () => {}});
+    renderer._allSkins[1] = mask;
+    mask.updateSilhouette = () => {};
+    mask._silhouette.colorAtNearest = (p, dst) => {
+        dst.set(p[0] < 0.5 ? [0, 0, 0, 128] : [255, 255, 255, 255]);
+        return dst;
+    };
+    const state = {skinId: 1, mode: 'alpha', space: 'local', x: 0, y: 0, width: 80, height: 60, inverted: false};
+    d.updateCostumeMask(state);
+    d.updateCPURenderAttributes();
+    const color = new Uint8ClampedArray(4);
+    t.same(Array.from(Drawable.sampleColor4b([-20, 0], d, color)), [128, 128, 128, 128]);
+    t.notOk(d.isTouching([45, 0]), 'outside mask image is transparent');
+    d.updateCostumeMask({...state, mode: 'luminance'});
+    d.updateCPURenderAttributes();
+    t.notOk(d.isTouching([-20, 0]), 'black removes pixels in luminance mode');
+    t.ok(d.isTouching([20, 0]));
+    d.updateCostumeMask({...state, mode: 'luminance', inverted: true});
+    d.updateCPURenderAttributes();
+    t.notOk(d.isTouching([20, 0]), 'inverse white is exactly transparent, with no floating-point residue');
+    t.ok(d.isTouching([45, 0]), 'inverse includes the region outside the mask image');
+    d.updateClipShape({left: -30, right: 30, bottom: -30, top: 30});
+    d.updateCPURenderAttributes();
+    t.notOk(d.isTouching([45, 0]), 'shape and mask intersect');
+    d.updateCostumeMask(null);
+    d.updateCPURenderAttributes();
+    t.notOk(d.isTouching([45, 0]), 'clearing the mask preserves shape clipping');
     t.end();
 });

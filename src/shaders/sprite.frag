@@ -49,6 +49,13 @@ uniform vec4 u_clipShape;
 uniform float u_clipInverse;
 uniform vec3 u_clipRowX;
 uniform vec3 u_clipRowY;
+uniform vec3 u_clipRowW;
+uniform sampler2D u_mask;
+uniform float u_maskMode;
+uniform float u_maskInverse;
+uniform vec3 u_maskRowX;
+uniform vec3 u_maskRowY;
+uniform vec3 u_maskRowW;
 uniform vec4 u_sliceX;
 uniform vec4 u_sliceY;
 
@@ -131,7 +138,8 @@ void main()
 	#if !(defined(DRAW_MODE_line) || defined(DRAW_MODE_background))
 	if (dot(v_texCoord, u_clipPlane.xy) > u_clipPlane.z) discard;
     if (u_clipShape.w > 0.0) {
-        vec2 p = abs(vec2(dot(vec3(v_texCoord, 1.0), u_clipRowX), dot(vec3(v_texCoord, 1.0), u_clipRowY)));
+        vec3 coordinate = vec3(v_texCoord, 1.0);
+        vec2 p = abs(vec2(dot(coordinate, u_clipRowX), dot(coordinate, u_clipRowY)) / dot(coordinate, u_clipRowW));
         vec2 halfSize = u_clipShape.xy;
         bool inside = halfSize.x > 0.0 && halfSize.y > 0.0 && all(lessThanEqual(p, halfSize));
         if (inside && u_clipShape.w == 2.0) {
@@ -224,6 +232,17 @@ void main()
 	gl_FragColor *= u_ghost;
 	#endif // ENABLE_ghost
 
+    if (u_maskMode > 0.0) {
+        vec3 coordinate = vec3(v_texCoord, 1.0);
+        vec2 uv = vec2(dot(coordinate, u_maskRowX), dot(coordinate, u_maskRowY)) / dot(coordinate, u_maskRowW);
+        float alpha = 0.0;
+        if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {
+            vec4 mask = texture2D(u_mask, uv);
+            alpha = u_maskMode == 2.0 ? dot(mask.rgb, vec3(0.2126, 0.7152, 0.0722)) : mask.a;
+        }
+        alpha = floor(alpha * 255.0 + 0.5) / 255.0;
+        gl_FragColor *= u_maskInverse > 0.5 ? 1.0 - alpha : alpha;
+    }
 	#ifdef DRAW_MODE_silhouette
 	// Discard fully transparent pixels for stencil test
 	if (gl_FragColor.a == 0.0) {

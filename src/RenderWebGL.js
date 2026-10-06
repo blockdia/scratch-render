@@ -662,6 +662,7 @@ class RenderWebGL extends EventEmitter {
 
     _reskin (skinId, newSkin) {
         const oldSkin = this._allSkins[skinId];
+        this.skinWasAltered(oldSkin);
         this._allSkins[skinId] = newSkin;
 
         // Tell drawables to update
@@ -813,6 +814,28 @@ class RenderWebGL extends EventEmitter {
     updateDrawableNineSlice (drawableID, value) {
         const drawable = this._allDrawables[drawableID];
         if (drawable) drawable.updateNineSlice(value);
+    }
+
+    updateDrawablePerspective (drawableID, value, offset) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updatePerspective(value, offset);
+    }
+
+    updateDrawableCostumeMask (drawableID, value) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateCostumeMask(value);
+    }
+
+    getDrawableLocalPosition (drawableID, x, y) {
+        const drawable = this._allDrawables[drawableID];
+        if (!drawable || !drawable.skin || !drawable._scale[0] || !drawable._scale[1]) return null;
+        drawable.updateMatrix();
+        const p = twgl.m4.transformPoint(drawable._inverseMatrix, [x, y, 0]);
+        const [w, h] = drawable.getGeometrySize();
+        const [cx, cy] = drawable.getGeometryCenter();
+        const result = [((0.5 - p[0]) * w) - cx + drawable._geometryOffset[0],
+            cy - ((p[1] + 0.5) * h) + drawable._geometryOffset[1]];
+        return result.every(Number.isFinite) ? result : null;
     }
 
     updateDrawableClipShape (drawableID, shape, offset) {
@@ -1064,7 +1087,7 @@ class RenderWebGL extends EventEmitter {
         for (let i = 0; i < this._drawList.length; i++) {
             const drawableId = this._drawList[i];
             const drawable = this._allDrawables[drawableId];
-            if (drawable._skin === skin) {
+            if (drawable._skin === skin || drawable.maskSkin === skin) {
                 drawable._skinWasAltered();
             }
         }
@@ -2382,7 +2405,9 @@ class RenderWebGL extends EventEmitter {
             if (uniforms.u_skin) {
                 twgl.setTextureParameters(
                     gl, uniforms.u_skin, {
-                        minMag: drawable.skin.useNearest(drawableScale, drawable) ? gl.NEAREST : gl.LINEAR
+                        minMag: (drawable.skin === drawable.maskSkin ||
+                            drawable.skin.useNearest(drawableScale, drawable)) ?
+                            gl.NEAREST : gl.LINEAR
                     }
                 );
             }

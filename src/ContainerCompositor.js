@@ -368,6 +368,8 @@ class ContainerCompositor {
         });
         twgl.setUniforms(shader, Object.assign({}, state.uniforms, {
             u_skin: surface.attachments[0],
+            u_mask: surface.attachments[0],
+            u_maskMode: 0,
             u_skinSize: [bounds.width, bounds.height],
             u_clipPlane: [0, 0, 1],
             u_sliceX: [0, 0, 0, 0],

@@ -20,18 +20,25 @@ const clipUniforms = (clip, uvToSpace) => {
         return {u_clipShape: [0, 0, 0, 0],
             u_clipInverse: 0,
             u_clipRowX: [0, 0, 0],
-            u_clipRowY: [0, 0, 0]};
+            u_clipRowY: [0, 0, 0],
+            u_clipRowW: [0, 0, 1]};
     }
     const hx = (clip.right - clip.left) / 2;
     const hy = (clip.top - clip.bottom) / 2;
     const divisor = Math.max(hx, hy, 1);
     const m = uvToSpace;
+    const w = m.length > 6 ? m.slice(6) : [0, 0, 1];
+    const cx = (clip.left + clip.right) / 2;
+    const cy = (clip.bottom + clip.top) / 2;
     return {
         u_clipShape: [hx / divisor, hy / divisor, Math.min(clip.radius || 0, hx, hy) / divisor,
             clip.type === 'ellipse' || clip.type === 'circle' ? 2 : clip.type === 'roundedRect' ? 3 : 1],
         u_clipInverse: clip.inverted ? 1 : 0,
-        u_clipRowX: [m[0] / divisor, m[2] / divisor, (m[4] - ((clip.left + clip.right) / 2)) / divisor],
-        u_clipRowY: [m[1] / divisor, m[3] / divisor, (m[5] - ((clip.bottom + clip.top) / 2)) / divisor]
+        u_clipRowX: [(m[0] - (cx * w[0])) / divisor, (m[2] - (cx * w[1])) / divisor,
+            (m[4] - (cx * w[2])) / divisor],
+        u_clipRowY: [(m[1] - (cy * w[0])) / divisor, (m[3] - (cy * w[1])) / divisor,
+            (m[5] - (cy * w[2])) / divisor],
+        u_clipRowW: w
     };
 };
 
@@ -40,6 +47,8 @@ const clipped = (uniforms, uv) => {
     if (!shape[3]) return false;
     const x = uniforms.u_clipRowX;
     const y = uniforms.u_clipRowY;
+    const w = uniforms.u_clipRowW;
+    const divisor = (w[0] * uv[0]) + (w[1] * uv[1]) + w[2];
     return !contains({left: -shape[0],
         right: shape[0],
         bottom: -shape[1],
@@ -47,7 +56,8 @@ const clipped = (uniforms, uv) => {
         radius: shape[2],
         type: shape[3] === 2 ? 'ellipse' : shape[3] === 3 ? 'roundedRect' : 'rect',
         inverted: Boolean(uniforms.u_clipInverse)},
-    (x[0] * uv[0]) + (x[1] * uv[1]) + x[2], (y[0] * uv[0]) + (y[1] * uv[1]) + y[2]);
+    ((x[0] * uv[0]) + (x[1] * uv[1]) + x[2]) / divisor,
+    ((y[0] * uv[0]) + (y[1] * uv[1]) + y[2]) / divisor);
 };
 
 // Source and destination edge fractions. Insets larger than the source shrink proportionally.

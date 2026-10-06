@@ -6,6 +6,8 @@ const ShaderManager = require('./ShaderManager');
 const EffectTransform = require('./EffectTransform');
 const log = require('./util/log');
 const Geometry = require('./GraphicGeometry');
+const Projective = require('./ProjectiveTransform');
+const CostumeMask = require('./CostumeMask');
 
 /**
  * An internal workspace for calculating texture locations from world vectors
@@ -58,6 +60,7 @@ const getLocalPosition = (drawable, vec) => {
         localPosition[1] = -1;
         return localPosition;
     }
+    const maskOpacity = drawable.maskOpacity(localPosition);
     drawable.mapTexturePosition(localPosition, localPosition);
     // Apply texture effect transform if the localPosition is within the drawable's space,
     // and any effects are currently active.
@@ -67,6 +70,7 @@ const getLocalPosition = (drawable, vec) => {
 
         EffectTransform.transformPoint(drawable, localPosition, localPosition);
     }
+    localPosition[2] = maskOpacity;
     return localPosition;
 };
 
@@ -103,6 +107,7 @@ class Drawable {
             u_silhouetteColor: Drawable.color4fFromID(this._id),
             u_clipPlane: [0, 0, 0],
             ...Geometry.clipUniforms(null),
+            ...CostumeMask.defaults(),
             u_sliceX: [0, 0, 0, 0],
             u_sliceY: [0, 0, 0, 0]
         };
@@ -137,6 +142,10 @@ class Drawable {
         this._clipShape = null;
         this._clipOffset = [0, 0];
         this._nineSlice = null;
+        this._perspective = null;
+        this._perspectiveMatrix = null;
+        this._geometryOffset = [0, 0];
+        this._costumeMask = null;
 
         /** A bitmask identifying which effects are currently in use.
          * @readonly
@@ -183,7 +192,8 @@ class Drawable {
      * It will be recalculated next time it's needed.
      */
     setTransformDirty () {
-        if (this._clipShape && this._clipShape.space === 'stage') this.setConvexHullDirty();
+        if ((this._clipShape && this._clipShape.space === 'stage') ||
+            (this._costumeMask && this._costumeMask.space === 'stage')) this.setConvexHullDirty();
         this._transformDirty = true;
         this._inverseTransformDirty = true;
         this._transformedHullDirty = true;
@@ -253,6 +263,15 @@ class Drawable {
         }
         this._updateClipUniform();
         this._updateGeometryUniforms();
+        const maskSkin = this.maskSkin;
+        if ((maskSkin || this.skin) && (maskSkin || this.skin).getTexture) {
+            this._uniforms.u_mask = (maskSkin || this.skin).getTexture(this.scale);
+        }
+        if (maskSkin) {
+            // Use nearest filtering for both GPU and CPU, including luminance and partial alpha.
+            const gl = this._renderer.gl;
+            twgl.setTextureParameters(gl, this._uniforms.u_mask, {minMag: gl.NEAREST});
+        }
         return this._uniforms;
     }
 
@@ -298,7 +317,7 @@ class Drawable {
      */
     isTexturePositionClipped (point) {
         const plane = this._uniforms.u_clipPlane;
-        return Geometry.clipped(this._uniforms, point) ||
+        return Geometry.clipped(this._uniforms, point) || this.maskOpacity(point) <= 0 ||
             ((point[0] * plane[0]) + (point[1] * plane[1])) > plane[2];
     }
 
@@ -306,6 +325,30 @@ class Drawable {
         if (JSON.stringify(value) === JSON.stringify(this._nineSlice)) return;
         this._nineSlice = value ? Object.assign({}, value) : null;
         this._skinWasAltered();
+    }
+
+    updatePerspective (value, offset = [0, 0]) {
+        if (JSON.stringify(value) === JSON.stringify(this._perspective) &&
+            offset.every((n, i) => n === this._geometryOffset[i])) return;
+        this._perspective = value ? JSON.parse(JSON.stringify(value)) : null;
+        this._perspectiveMatrix = value && value.frame ? Projective.matrix(value.frame, value.corners) : null;
+        this._geometryOffset = offset.slice();
+        this._skinWasAltered();
+    }
+
+    updateCostumeMask (value) {
+        if (JSON.stringify(value) === JSON.stringify(this._costumeMask)) return;
+        this._costumeMask = value ? {...value} : null;
+        this.setConvexHullDirty();
+        this._renderer.dirty = true;
+    }
+
+    get maskSkin () {
+        return this._costumeMask && this._renderer._allSkins[this._costumeMask.skinId];
+    }
+
+    maskOpacity (uv) {
+        return CostumeMask.opacity(this._uniforms, this.maskSkin, uv);
     }
 
     updateClipShape (shape, offset = [0, 0]) {
@@ -337,12 +380,15 @@ class Drawable {
         const [w, h] = this.getGeometrySize();
         const [cx, cy] = this.getGeometryCenter();
         const m = this._uniforms.u_modelMatrix;
-        const stage = this._clipShape && this._clipShape.space === 'stage';
         // Drawable quad's x is reversed relative to texture u; texture v points down.
-        const mapping = stage ? [-m[0], -m[1], m[4], m[5],
-            m[12] + ((m[0] - m[4]) / 2), m[13] + ((m[1] - m[5]) / 2)] :
-            [w, 0, 0, -h, -cx + this._clipOffset[0], cy + this._clipOffset[1]];
-        Object.assign(this._uniforms, Geometry.clipUniforms(this._clipShape, mapping));
+        const stageMapping = [-m[0], -m[1], m[4], m[5],
+            m[12] + ((m[0] - m[4]) / 2), m[13] + ((m[1] - m[5]) / 2),
+            -m[3], m[7], m[15] + ((m[3] - m[7]) / 2)];
+        const localMapping = [w, 0, 0, -h, -cx + this._clipOffset[0], cy + this._clipOffset[1]];
+        Object.assign(this._uniforms, Geometry.clipUniforms(this._clipShape,
+            this._clipShape && this._clipShape.space === 'stage' ? stageMapping : localMapping));
+        Object.assign(this._uniforms, CostumeMask.uniforms(this.maskSkin ? this._costumeMask : null,
+            this._costumeMask && this._costumeMask.space === 'stage' ? stageMapping : localMapping));
         const n = this._nineSlice;
         this._uniforms.u_sliceX = n && this.skin.size[0] > 0 ?
             Geometry.sliceAxis(this.skin.size[0], w, n.left, n.right) : [0, 0, 0, 0];
@@ -596,11 +642,11 @@ class Drawable {
         modelMatrix[0] = scale0 * rotation00;
         modelMatrix[1] = scale0 * rotation01;
         // modelMatrix[2] = 0;
-        // modelMatrix[3] = 0;
+        modelMatrix[3] = 0;
         modelMatrix[4] = scale1 * rotation10;
         modelMatrix[5] = scale1 * rotation11;
         // modelMatrix[6] = 0;
-        // modelMatrix[7] = 0;
+        modelMatrix[7] = 0;
         // modelMatrix[8] = 0;
         // modelMatrix[9] = 0;
         // modelMatrix[10] = 1;
@@ -608,7 +654,7 @@ class Drawable {
         modelMatrix[12] = (rotation00 * adjusted0) + (rotation10 * adjusted1) + position0;
         modelMatrix[13] = (rotation01 * adjusted0) + (rotation11 * adjusted1) + position1;
         // modelMatrix[14] = 0;
-        // modelMatrix[15] = 1;
+        modelMatrix[15] = 1;
 
         const p = this._parentTransform;
         for (const offset of [0, 4, 12]) {
@@ -616,6 +662,20 @@ class Drawable {
             const y = modelMatrix[offset + 1];
             modelMatrix[offset] = (p[0] * x) + (p[2] * y) + (offset === 12 ? p[4] : 0);
             modelMatrix[offset + 1] = (p[1] * x) + (p[3] * y) + (offset === 12 ? p[5] : 0);
+        }
+        if (this._perspective && this.skin) {
+            const [w, h] = this.getGeometrySize();
+            const [cx, cy] = this.getGeometryCenter();
+            this._perspectiveMatrix = Projective.matrix(this._perspective.frame || [-cx, w - cx, cy - h, cy],
+                this._perspective.corners);
+            if (w > 0 && h > 0) {
+                const quad = twgl.m4.scaling([-w, -h, 1]);
+                quad[12] = (w / 2) - cx + this._geometryOffset[0];
+                quad[13] = cy - (h / 2) + this._geometryOffset[1];
+                const warp = twgl.m4.multiply(twgl.m4.inverse(quad),
+                    twgl.m4.multiply(this._perspectiveMatrix, quad));
+                twgl.m4.multiply(modelMatrix, warp, modelMatrix);
+            }
         }
         this._transformDirty = false;
     }
@@ -745,7 +805,12 @@ class Drawable {
         }
         const tm = this._uniforms.u_modelMatrix;
         result = result || new Rectangle();
-        result.initFromModelMatrix(tm);
+        if (this._perspectiveMatrix) {
+            result.initFromPointsAABB([[-0.5, -0.5, 0], [-0.5, 0.5, 0], [0.5, 0.5, 0], [0.5, -0.5, 0]]
+                .map(point => twgl.m4.transformPoint(tm, point)));
+        } else {
+            result.initFromModelMatrix(tm);
+        }
         return result;
     }
 
@@ -823,6 +888,7 @@ class Drawable {
         this._updateClipUniform();
         this._updateGeometryUniforms();
         // Include parent scaling so CPU sensing uses the same skin resolution as drawing.
+        if (this.maskSkin) this.maskSkin.updateSilhouette(this.scale);
         if (this.skin) {
             const scale = this.scale;
             this.skin.updateSilhouette(scale);
@@ -908,8 +974,9 @@ class Drawable {
              drawable.skin._silhouette.colorAtNearest(localPosition, dst);
         // : drawable.skin._silhouette.colorAtLinear(localPosition, dst);
 
-        if (drawable.enabledEffects === 0) return textColor;
-        return EffectTransform.transformColor(drawable, textColor, effectMask);
+        if (drawable.enabledEffects !== 0) EffectTransform.transformColor(drawable, textColor, effectMask);
+        for (let i = 0; i < 4; i++) textColor[i] *= localPosition[2];
+        return textColor;
     }
 }
 
