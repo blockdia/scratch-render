@@ -158,7 +158,15 @@ class ContainerCompositor {
                     .map(path => this.states.get(path))
                     .filter(s => s && s.warp)
                     .map(s => ({world: s.matrix3, inverse: s.inverse3, warp: s.warp}));
-                const pieces = this.mesh(corners(drawable.getAABB()).map(p => [...p, 1]), steps);
+                // Keep the actual quad until it reaches container-local coordinates: a world AABB
+                // would retain extra space introduced by container rotation. Preserve homogeneous
+                // coordinates so descendant nine-slice splits also respect member perspective.
+                drawable.updateMatrix();
+                const m = drawable._uniforms.u_modelMatrix;
+                const quad = [[-0.5, -0.5], [0.5, -0.5], [0.5, 0.5], [-0.5, 0.5]].map(([x, y]) =>
+                    [(m[0] * x) + (m[4] * y) + m[12], (m[1] * x) + (m[5] * y) + m[13],
+                        (m[3] * x) + (m[7] * y) + m[15]]);
+                const pieces = this.mesh(quad, steps);
                 for (const piece of pieces) {
                     points.push(...piece.map(v => Warp.point(state.inverse3, [v.p[0] / v.p[2], v.p[1] / v.p[2]])));
                 }

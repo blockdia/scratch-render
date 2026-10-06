@@ -23,6 +23,55 @@ const fixture = () => {
     return {d, renderer};
 };
 
+test('container reference frames exclude container rotation, stretch and ancestor geometry', t => {
+    const {d, renderer} = fixture();
+    renderer._drawList = [0];
+    renderer._drawableContainerPaths.set(0, ['outer', 'inner']);
+    d.updatePosition([12, -8]);
+    d.updateVisible(false); // Hidden members are still part of the fixed reference frame.
+    for (const angle of [0, Math.PI / 4, Math.PI / 3]) {
+        for (const xScale of [1, -1.5]) {
+            const c = Math.cos(angle);
+            const s = Math.sin(angle);
+            const matrix = [c * xScale, s * xScale, -s * 0.7, c * 0.7, 30, -20];
+            d.updateParentTransform(matrix);
+            renderer.setDrawableContainerAppearances(['outer', 'inner'].map(id => ({id,
+                matrix,
+                geometry: {frame: {x: 0, y: 0, width: 100, height: 60},
+                    perspective: [[20, 0], [-20, 0], [0, 0], [0, 0]]}})));
+            const frame = renderer.getContainerGeometryFrame('inner');
+            for (const [key, expected] of Object.entries({x: 12, y: -8, width: 100, height: 60})) {
+                t.ok(Math.abs(frame[key] - expected) < 0.0001, `${key} stays in container-local coordinates`);
+            }
+        }
+    }
+    t.end();
+});
+
+test('container reference frames include member perspective and descendant nine-slice geometry', t => {
+    const {d, renderer} = fixture();
+    renderer._drawList = [0];
+    renderer._drawableContainerPaths.set(0, ['outer', 'inner']);
+    const c = Math.SQRT1_2;
+    const outer = [c, c, -c, c, 50, -20];
+    const inner = [c, c, -c, c, 50 + (20 * c), -20 + (40 * c)];
+    d.updateParentTransform(inner);
+    d.updatePerspective({frame: null, corners: [[20, 0], [-20, 0], [0, 0], [0, 0]]});
+    renderer.setDrawableContainerAppearances([
+        {id: 'outer', matrix: outer},
+        {id: 'inner',
+            matrix: inner,
+            geometry: {frame: {x: 0, y: 0, width: 100, height: 60},
+                borders: {left: 10, right: 10, top: 10, bottom: 10},
+                nineSlice: {width: 200, height: 100}}}
+    ]);
+    const frame = renderer.getContainerGeometryFrame('outer');
+    for (const [key, expected] of Object.entries({x: 30, y: 10, width: 200, height: 100})) {
+        t.ok(Math.abs(frame[key] - expected) < 0.0001, `${key} includes only descendant geometry`);
+    }
+    t.end();
+});
+
 test('nine-slice preserves border thickness through resizing, rotation and mirroring', t => {
     const {d} = fixture();
     d.updateNineSlice({width: 200, height: 80, left: 10, right: 20, top: 8, bottom: 12});
