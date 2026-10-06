@@ -20,6 +20,10 @@ const float epsilon = 1e-3;
 uniform mat4 u_projectionMatrix;
 uniform mat4 u_modelMatrix;
 attribute vec2 a_texCoord;
+attribute vec3 a_warpPosition;
+attribute vec3 a_stagePosition;
+uniform float u_warpMesh;
+varying vec3 v_stagePosition;
 #endif
 
 attribute vec2 a_position;
@@ -76,7 +80,14 @@ void main() {
 	#elif defined(DRAW_MODE_background)
 	gl_Position = vec4(a_position * 2.0, 0, 1);
 	#else
-	gl_Position = u_projectionMatrix * u_modelMatrix * vec4(a_position, 0, 1);
+	if (u_warpMesh > 0.5) {
+        gl_Position = u_projectionMatrix * vec4(a_warpPosition.xy, 0.0, a_warpPosition.z);
+        v_stagePosition = a_stagePosition;
+    } else {
+        vec4 position = u_modelMatrix * vec4(a_position, 0, 1);
+        gl_Position = u_projectionMatrix * position;
+        v_stagePosition = position.xyw;
+    }
 	v_texCoord = a_texCoord;
 	#endif
 }

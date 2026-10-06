@@ -3,6 +3,8 @@ const Drawable = require('../../src/Drawable');
 const MockSkin = require('../fixtures/MockSkin');
 const RenderWebGL = require('../../src/RenderWebGL');
 const twgl = require('twgl.js');
+const Warp = require('../../src/ContainerGeometry');
+const Mesh = require('../../src/ContainerGeometryMesh');
 
 const fixture = () => {
     const renderer = Object.create(RenderWebGL.prototype);
@@ -163,5 +165,50 @@ test('costume alpha and luminance masks affect collision and premultiplied CPU c
     d.updateCostumeMask(null);
     d.updateCPURenderAttributes();
     t.notOk(d.isTouching([45, 0]), 'clearing the mask preserves shape clipping');
+    t.end();
+});
+
+test('container meshes split on slice boundaries and preserve nested inverse and stage coordinates', t => {
+    const g = Warp.prepare({frame: {x: 10, y: -5, width: 100, height: 60},
+        borders: {left: 10, right: 20, top: 8, bottom: 12},
+        nineSlice: {width: 200, height: 80},
+        perspective: [[20, 0], [-20, 0], [0, 0], [0, 0]]});
+    const world = [0, -2, 30, -1.5, 0, 20, 0, 0, 1];
+    const step = {warp: g, world, inverse: Warp.inverse(world)};
+    const points = [[-40, -35], [60, -35], [60, 25], [-40, 25]];
+    const pieces = Mesh.polygons(points.map(p => [...Warp.point(world, p), 1]), [step], true);
+    t.equal(pieces.length, 9, 'nine exact regions without approximate tessellation');
+    for (const p of [[-35, -30], [0, 0], [50, 20]]) {
+        const restored = Warp.backward(g, Warp.forward(g, p));
+        t.ok(p.every((n, i) => Math.abs(n - restored[i]) < 1e-6), 'inverse including unequal borders and center');
+    }
+    for (const piece of pieces) {
+        for (const v of piece) {
+            const source = [-40 + (v.uv[0] * 100), 25 - (v.uv[1] * 60)];
+            const expected = Warp.point(world, Warp.forward(g, source));
+            t.ok(expected.every((n, i) => Math.abs(n - (v.p[i] / v.p[2])) < 1e-6),
+                'homogeneous vertex matches coordinate contract');
+        }
+    }
+    const allBorders = Warp.prepare({frame: {x: 0, y: 0, width: 100, height: 60},
+        borders: {left: 100, right: 100, top: 60, bottom: 60},
+        nineSlice: {width: 300, height: 200}});
+    for (const p of [[0, 0], [1, 1], [-20, 15]]) {
+        const restored = Warp.backward(allBorders, Warp.forward(allBorders, p));
+        t.ok(restored.every((n, i) => Number.isFinite(n) && Math.abs(n - p[i]) < 1e-4),
+            'oversized borders retain an invertible center');
+    }
+    t.end();
+});
+
+test('collapsed container axes do not poison local movement or picking', t => {
+    const {d, renderer} = fixture();
+    d.updateParentTransform([0, 0, 0, 1, 0, 0]);
+    t.same(renderer.getFencedPositionOfDrawable(0, [15, 20]), [15, 20]);
+    d.updateCPURenderAttributes();
+    t.notOk(d.isTouching([0, 0]));
+    d.updateParentTransform([-1, 0, 0, 1, 0, 0]);
+    d.updateCPURenderAttributes();
+    t.ok(d.isTouching([0, 0]), 'restoring a mirrored axis restores picking');
     t.end();
 });

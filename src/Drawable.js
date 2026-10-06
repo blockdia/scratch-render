@@ -38,7 +38,8 @@ const getLocalPosition = (drawable, vec) => {
         __isTouchingPosition[1] = -1;
         return __isTouchingPosition;
     }
-    // Transfrom from world coordinates to Drawable coordinates.
+    if (compositor && compositor.active) vec = compositor.unwarpPoint(drawable._id, vec);
+    // Transform from world coordinates to Drawable coordinates.
     const localPosition = __isTouchingPosition;
     const v0 = vec[0];
     const v1 = vec[1];
@@ -50,6 +51,10 @@ const getLocalPosition = (drawable, vec) => {
     // localPosition matches that transformation.
     localPosition[0] = 0.5 - (((v0 * m[0]) + (v1 * m[4]) + m[12]) / d);
     localPosition[1] = (((v0 * m[1]) + (v1 * m[5]) + m[13]) / d) + 0.5;
+    if (!Number.isFinite(localPosition[0]) || !Number.isFinite(localPosition[1])) {
+        localPosition[0] = localPosition[1] = -1;
+        return localPosition;
+    }
     // Fix floating point issues near 0. Filed https://github.com/LLK/scratch-render/issues/688 that
     // they're happening in the first place.
     // TODO: Check if this can be removed after render pull 479 is merged
@@ -317,7 +322,8 @@ class Drawable {
      */
     isTexturePositionClipped (point) {
         const plane = this._uniforms.u_clipPlane;
-        return Geometry.clipped(this._uniforms, point) || this.maskOpacity(point) <= 0 ||
+        return Geometry.clipped(this._uniforms, this._uniforms.u_clipStage ? this.stagePosition(point) : point) ||
+            this.maskOpacity(point) <= 0 ||
             ((point[0] * plane[0]) + (point[1] * plane[1])) > plane[2];
     }
 
@@ -347,8 +353,15 @@ class Drawable {
         return this._costumeMask && this._renderer._allSkins[this._costumeMask.skinId];
     }
 
+    stagePosition (uv) {
+        const p = twgl.m4.transformPoint(this._uniforms.u_modelMatrix, [0.5 - uv[0], uv[1] - 0.5, 0]);
+        const compositor = this._renderer._containerCompositor;
+        return compositor && compositor.active ? compositor.warpPoint(this._id, p) : p;
+    }
+
     maskOpacity (uv) {
-        return CostumeMask.opacity(this._uniforms, this.maskSkin, uv);
+        return CostumeMask.opacity(this._uniforms, this.maskSkin,
+            this._uniforms.u_maskStage ? this.stagePosition(uv) : uv);
     }
 
     updateClipShape (shape, offset = [0, 0]) {
@@ -379,11 +392,9 @@ class Drawable {
         if (!this.skin) return;
         const [w, h] = this.getGeometrySize();
         const [cx, cy] = this.getGeometryCenter();
-        const m = this._uniforms.u_modelMatrix;
-        // Drawable quad's x is reversed relative to texture u; texture v points down.
-        const stageMapping = [-m[0], -m[1], m[4], m[5],
-            m[12] + ((m[0] - m[4]) / 2), m[13] + ((m[1] - m[5]) / 2),
-            -m[3], m[7], m[15] + ((m[3] - m[7]) / 2)];
+        const stageMapping = [1, 0, 0, 1, 0, 0];
+        this._uniforms.u_clipStage = this._clipShape && this._clipShape.space === 'stage' ? 1 : 0;
+        this._uniforms.u_maskStage = this._costumeMask && this._costumeMask.space === 'stage' ? 1 : 0;
         const localMapping = [w, 0, 0, -h, -cx + this._clipOffset[0], cy + this._clipOffset[1]];
         Object.assign(this._uniforms, Geometry.clipUniforms(this._clipShape,
             this._clipShape && this._clipShape.space === 'stage' ? stageMapping : localMapping));

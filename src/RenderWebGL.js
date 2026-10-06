@@ -826,10 +826,28 @@ class RenderWebGL extends EventEmitter {
         if (drawable) drawable.updateCostumeMask(value);
     }
 
+    getDrawableUnwarpedPosition (id, x, y) {
+        return this._containerCompositor ? this._containerCompositor.unwarpPoint(id, [x, y]) : [x, y];
+    }
+
+    getContainerGeometryFrame (id) {
+        return this._containerCompositor ? this._containerCompositor.getFrame(id) :
+            {x: 0, y: 0, width: 100, height: 100};
+    }
+
+    _getDrawableBounds (id) {
+        const drawable = this._allDrawables[id];
+        const compositor = this._containerCompositor;
+        const bounds = compositor && compositor.steps(id).length ? drawable.getAABB() : drawable.getFastBounds();
+        return this._containerCompositor && this._containerCompositor.active ?
+            this._containerCompositor.clipBounds(id, bounds) : bounds;
+    }
+
     getDrawableLocalPosition (drawableID, x, y) {
         const drawable = this._allDrawables[drawableID];
         if (!drawable || !drawable.skin || !drawable._scale[0] || !drawable._scale[1]) return null;
         drawable.updateMatrix();
+        if (this._containerCompositor) [x, y] = this._containerCompositor.unwarpPoint(drawableID, [x, y]);
         const p = twgl.m4.transformPoint(drawable._inverseMatrix, [x, y, 0]);
         const [w, h] = drawable.getGeometrySize();
         const [cx, cy] = drawable.getGeometryCenter();
@@ -1145,10 +1163,7 @@ class RenderWebGL extends EventEmitter {
             const points = this._getConvexHullPointsForDrawable(drawableID);
             drawable.setConvexHullPoints(points);
         }
-        let bounds = drawable.getFastBounds();
-        if (this._containerCompositor && this._containerCompositor.active) {
-            bounds = this._containerCompositor.clipBounds(drawableID, bounds);
-        }
+        const bounds = this._getDrawableBounds(drawableID);
         // In debug mode, draw the bounds.
         if (this._debugCanvas) {
             const gl = this._gl;
@@ -1181,7 +1196,9 @@ class RenderWebGL extends EventEmitter {
             const points = this._getConvexHullPointsForDrawable(drawableID);
             drawable.setConvexHullPoints(points);
         }
-        const bounds = drawable.getBoundsForBubble();
+        const rawBounds = drawable.getBoundsForBubble();
+        const bounds = this._containerCompositor && this._containerCompositor.active ?
+            this._containerCompositor.clipBounds(drawableID, rawBounds) : rawBounds;
         // In debug mode, draw the bounds.
         if (this._debugCanvas) {
             const gl = this._gl;
@@ -1543,7 +1560,7 @@ class RenderWebGL extends EventEmitter {
         }
         const bounds = this.clientSpaceToScratchBounds(centerX, centerY, touchWidth, touchHeight);
 
-        const drawableBounds = drawable.getFastBounds();
+        const drawableBounds = this._getDrawableBounds(drawable._id);
         drawableBounds.snapToInt();
         if (!drawableBounds.intersects(bounds)) {
             return false;
@@ -1590,7 +1607,7 @@ class RenderWebGL extends EventEmitter {
             // default pick list ignores visible and ghosted sprites.
             if (drawable.getVisible() && drawable.getUniforms().u_ghost !== 0 &&
                 !(this._containerCompositor && this._containerCompositor.isGhosted(id))) {
-                const drawableBounds = drawable.getFastBounds();
+                const drawableBounds = this._getDrawableBounds(drawable._id);
                 const inRange = bounds.intersects(drawableBounds);
                 if (!inRange) return false;
 
@@ -1662,9 +1679,9 @@ class RenderWebGL extends EventEmitter {
 
         const group = this._drawableGroups.get(this._drawableGroupById.get(drawableID));
         const drawableIDs = group ? group.drawables : [drawableID];
-        const scratchBounds = drawable.getFastBounds();
+        const scratchBounds = this._getDrawableBounds(drawableID);
         for (const id of drawableIDs) {
-            Rectangle.union(scratchBounds, this._allDrawables[id].getFastBounds(), scratchBounds);
+            Rectangle.union(scratchBounds, this._getDrawableBounds(id), scratchBounds);
         }
         const compositor = this._containerCompositor;
         const containerTree = compositor && compositor.active ? compositor.prepare(drawableIDs) : null;
@@ -1850,8 +1867,7 @@ class RenderWebGL extends EventEmitter {
         /** @todo remove this once URL-based skin setting is removed. */
         if (!drawable.skin || !drawable.skin.getTexture([100, 100])) return null;
 
-        const bounds = this._containerCompositor && this._containerCompositor.active ?
-            this._containerCompositor.clipBounds(drawableID, drawable.getFastBounds()) : drawable.getFastBounds();
+        const bounds = this._getDrawableBounds(drawableID);
 
         // Limit queries to the stage size.
         if (!this.offscreenTouching) {
@@ -1896,8 +1912,7 @@ class RenderWebGL extends EventEmitter {
 
                     // Update the CPU position data
                     drawable.updateCPURenderAttributes();
-                    const candidateBounds = this._containerCompositor && this._containerCompositor.active ?
-                        this._containerCompositor.clipBounds(id, drawable.getFastBounds()) : drawable.getFastBounds();
+                    const candidateBounds = this._getDrawableBounds(id);
 
                     // Push bounds out to integers. If a drawable extends out into half a pixel, that half-pixel still
                     // needs to be tested. Plus, in some areas we construct another rectangle from the union of these,
@@ -2070,11 +2085,20 @@ class RenderWebGL extends EventEmitter {
         }
 
         const p = drawable._parentTransform;
+        const det = (p[0] * p[3]) - (p[1] * p[2]);
+        if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return position.slice();
+        const compositor = this._containerCompositor;
+        const warped = compositor && compositor.steps(drawableID).length;
         [x, y] = [(p[0] * x) + (p[2] * y) + p[4], (p[1] * x) + (p[3] * y) + p[5]];
-        const current = drawable.getWorldPosition();
+        let current = drawable.getWorldPosition();
+        if (warped) {
+            [x, y] = compositor.warpPoint(drawableID, [x, y]);
+            current = compositor.warpPoint(drawableID, current);
+        }
         const dx = x - current[0];
         const dy = y - current[1];
-        const aabb = drawable._skin.getFenceBounds(drawable, __fenceBounds);
+        const aabb = warped ? this._getDrawableBounds(drawableID) :
+            drawable._skin.getFenceBounds(drawable, __fenceBounds);
         const inset = Math.floor(Math.min(aabb.width, aabb.height) / 2);
 
         const sx = this._xRight - Math.min(FENCE_WIDTH, inset);
@@ -2089,7 +2113,8 @@ class RenderWebGL extends EventEmitter {
         } else if (aabb.bottom + dy > sy) {
             y = Math.floor(current[1] + (sy - aabb.bottom));
         }
-        const det = (p[0] * p[3]) - (p[1] * p[2]);
+        if (warped) [x, y] = compositor.unwarpPoint(drawableID, [x, y]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return position.slice();
         return [((p[3] * (x - p[4])) - (p[2] * (y - p[5]))) / det,
             ((p[0] * (y - p[5])) - (p[1] * (x - p[4]))) / det];
     }
@@ -2147,7 +2172,7 @@ class RenderWebGL extends EventEmitter {
             return;
         }
 
-        const bounds = stampDrawable.getFastBounds();
+        const bounds = this._getDrawableBounds(stampID);
         const drawableIDs = [stampID];
         const compositor = this._containerCompositor;
         const containerTree = compositor && compositor.active ?
@@ -2373,7 +2398,7 @@ class RenderWebGL extends EventEmitter {
             // Skip drawables with a skin that does not have a texture.
             if (!drawable.skin.getTexture(drawableScale)) continue;
 
-            const uniforms = {};
+            const uniforms = {u_warpMesh: 0};
 
             let effectBits = drawable.enabledEffects;
             effectBits &= Object.prototype.hasOwnProperty.call(opts, 'effectMask') ? opts.effectMask : effectBits;
@@ -2412,8 +2437,22 @@ class RenderWebGL extends EventEmitter {
                 );
             }
 
-            twgl.setUniforms(currentShader, uniforms);
-            twgl.drawBufferInfo(gl, this._bufferInfo, gl.TRIANGLES);
+            const compositor = this._containerCompositor;
+            const steps = compositor && (uniforms.u_clipStage || uniforms.u_maskStage) ?
+                compositor.steps(drawableID) : [];
+            if (steps.length) {
+                uniforms.u_warpMesh = 1;
+                twgl.setUniforms(currentShader, uniforms);
+                const m = uniforms.u_modelMatrix;
+                const points = [[0.5, 0.5], [-0.5, 0.5], [-0.5, -0.5], [0.5, -0.5]].map(([x, y]) =>
+                    [(m[0] * x) + (m[4] * y) + m[12], (m[1] * x) + (m[5] * y) + m[13],
+                        (m[3] * x) + (m[7] * y) + m[15]]);
+                compositor.drawMesh(currentShader, compositor.mesh(points, steps));
+                twgl.setBuffersAndAttributes(gl, currentShader, this._bufferInfo);
+            } else {
+                twgl.setUniforms(currentShader, uniforms);
+                twgl.drawBufferInfo(gl, this._bufferInfo, gl.TRIANGLES);
+            }
         }
 
         this._regionId = null;

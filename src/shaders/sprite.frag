@@ -56,6 +56,11 @@ uniform float u_maskInverse;
 uniform vec3 u_maskRowX;
 uniform vec3 u_maskRowY;
 uniform vec3 u_maskRowW;
+uniform float u_clipStage;
+uniform float u_maskStage;
+#if !(defined(DRAW_MODE_line) || defined(DRAW_MODE_background))
+varying vec3 v_stagePosition;
+#endif
 uniform vec4 u_sliceX;
 uniform vec4 u_sliceY;
 
@@ -139,6 +144,9 @@ void main()
 	if (dot(v_texCoord, u_clipPlane.xy) > u_clipPlane.z) discard;
     if (u_clipShape.w > 0.0) {
         vec3 coordinate = vec3(v_texCoord, 1.0);
+        #if !(defined(DRAW_MODE_line) || defined(DRAW_MODE_background))
+        if (u_clipStage > 0.5) coordinate = vec3(v_stagePosition.xy / v_stagePosition.z, 1.0);
+        #endif
         vec2 p = abs(vec2(dot(coordinate, u_clipRowX), dot(coordinate, u_clipRowY)) / dot(coordinate, u_clipRowW));
         vec2 halfSize = u_clipShape.xy;
         bool inside = halfSize.x > 0.0 && halfSize.y > 0.0 && all(lessThanEqual(p, halfSize));
@@ -234,6 +242,9 @@ void main()
 
     if (u_maskMode > 0.0) {
         vec3 coordinate = vec3(v_texCoord, 1.0);
+        #if !(defined(DRAW_MODE_line) || defined(DRAW_MODE_background))
+        if (u_maskStage > 0.5) coordinate = vec3(v_stagePosition.xy / v_stagePosition.z, 1.0);
+        #endif
         vec2 uv = vec2(dot(coordinate, u_maskRowX), dot(coordinate, u_maskRowY)) / dot(coordinate, u_maskRowW);
         float alpha = 0.0;
         if (all(greaterThanEqual(uv, vec2(0.0))) && all(lessThanEqual(uv, vec2(1.0)))) {

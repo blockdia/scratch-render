@@ -4,6 +4,8 @@ const EffectTransform = require('./EffectTransform');
 const ShaderManager = require('./ShaderManager');
 const Rectangle = require('./Rectangle');
 const Geometry = require('./GraphicGeometry');
+const Warp = require('./ContainerGeometry');
+const Mesh = require('./ContainerGeometryMesh');
 
 const IDENTITY = [1, 0, 0, 1, 0, 0];
 const EMPTY_PATH = [];
@@ -12,7 +14,7 @@ const COLOR_EFFECTS = ShaderManager.EFFECT_INFO.color.mask | ShaderManager.EFFEC
 // Scratch's regular stage fits comfortably; oversized/deep effects reduce resolution, never drop effects.
 const MAX_PIXELS = 4 * 1024 * 1024;
 const matrix4 = m => new Float32Array([m[0], m[1], 0, 0, m[2], m[3], 0, 0, 0, 0, 1, 0, m[4], m[5], 0, 1]);
-const point = (m, x, y) => [(m[0] * x) + (m[4] * y) + m[12], (m[1] * x) + (m[5] * y) + m[13]];
+const point = (m, x, y) => Array.from(twgl.m4.transformPoint(m, [x, y, 0])).slice(0, 2);
 const corners = b => [[b.left, b.bottom], [b.right, b.bottom], [b.right, b.top], [b.left, b.top]];
 
 /** GPU-only temporary surfaces plus a matching logical (non-warped) CPU scene sampler. */
@@ -28,7 +30,7 @@ class ContainerCompositor {
         const ids = new Set();
         for (const state of states) {
             ids.add(state.id);
-            this.setState(state.id, state.effects, state.clip, state.matrix, false);
+            this.setState(state.id, state.effects, state.clip, state.matrix, false, state.geometry);
         }
         for (const id of this.states.keys()) {
             if (!ids.has(id)) this.states.delete(id);
@@ -36,7 +38,7 @@ class ContainerCompositor {
         this._updateActive();
     }
 
-    setState (id, effects, clip, matrix, update = true) {
+    setState (id, effects, clip, matrix, update = true, geometry) {
         const previous = this.states.get(id);
         const world = matrix ? matrix4(matrix) : previous ? previous.world : matrix4(IDENTITY);
         const uniforms = {};
@@ -47,7 +49,12 @@ class ContainerCompositor {
             uniforms[info.uniformName] = info.converter(value);
             if (value) enabledEffects |= info.mask;
         }
+        const warp = typeof geometry === 'undefined' && previous ? previous.warp : Warp.prepare(geometry);
+        const matrix3 = [world[0], world[4], world[12], world[1], world[5], world[13], 0, 0, 1];
         const state = {id,
+            warp: warp && warp.active ? warp : null,
+            matrix3,
+            inverse3: Warp.inverse(matrix3),
             world,
             inverse: twgl.m4.inverse(world),
             enabledEffects,
@@ -59,7 +66,7 @@ class ContainerCompositor {
     }
 
     _updateActive () {
-        this.active = Array.from(this.states.values()).some(state => state.enabledEffects || state.clip);
+        this.active = Array.from(this.states.values()).some(state => state.enabledEffects || state.clip || state.warp);
         if (!this.active) this._releaseFrom(0);
         this.renderer.dirty = true;
     }
@@ -76,18 +83,96 @@ class ContainerCompositor {
         return this.renderer._drawableContainerPaths.get(id) || EMPTY_PATH;
     }
 
-    isPointClipped (id, position) {
+    steps (id) {
+        return this.paths(id).slice()
+            .reverse()
+            .map(path => this.states.get(path))
+            .filter(s => s && s.warp)
+            .map(s => ({world: s.matrix3, inverse: s.inverse3, warp: s.warp}));
+    }
+
+    warpPoint (id, position) {
+        return this.steps(id).reduce((p, step) => Warp.point(step.world,
+            Warp.forward(step.warp, Warp.point(step.inverse, p))), [position[0], position[1]]);
+    }
+
+    unwarpPoint (id, position) {
+        let p = [position[0], position[1]];
         for (const path of this.paths(id)) {
             const state = this.states.get(path);
-            if (!state || !state.clip) continue;
-            const m = state.inverse;
-            const stage = state.clip.space === 'stage';
-            const x = stage ? position[0] : (m[0] * position[0]) + (m[4] * position[1]) + m[12];
-            const y = stage ? position[1] : (m[1] * position[0]) + (m[5] * position[1]) + m[13];
-            const c = state.clip;
-            if (!Geometry.contains(c, x, y)) return true;
+            if (state && state.warp) {
+                p = Warp.point(state.matrix3,
+                    Warp.backward(state.warp, Warp.point(state.inverse3, p)));
+            }
+        }
+        return p;
+    }
+
+    isPointClipped (id, position) {
+        let p = [position[0], position[1]];
+        for (const path of this.paths(id)) {
+            const state = this.states.get(path);
+            if (!state) continue;
+            let local = Warp.point(state.inverse3, p);
+            if (state.warp) {
+                local = Warp.backward(state.warp, local);
+                p = Warp.point(state.matrix3, local);
+            }
+            if (!local.every(Number.isFinite)) return true;
+            if (state.clip && !Geometry.contains(state.clip,
+                ...(state.clip.space === 'stage' ? position : local))) return true;
         }
         return false;
+    }
+
+    mesh (points, steps, renderFirst) {
+        return Mesh.polygons(points, steps, renderFirst);
+    }
+
+    drawMesh (shader, polygons) {
+        const gl = this.renderer.gl;
+        const arrays = Mesh.arrays(polygons);
+        if (!arrays.a_texCoord.data.length) return;
+        // One streaming buffer per attribute, reused across all containers and passes.
+        if (this.meshBuffer) {
+            for (const [name, data] of Object.entries(arrays)) {
+                gl.bindBuffer(gl.ARRAY_BUFFER, this.meshBuffer.attribs[name].buffer);
+                gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(data.data), gl.DYNAMIC_DRAW);
+            }
+            this.meshBuffer.numElements = arrays.a_texCoord.data.length / 2;
+        } else this.meshBuffer = twgl.createBufferInfoFromArrays(gl, arrays);
+        twgl.setBuffersAndAttributes(gl, shader, this.meshBuffer);
+        twgl.drawBufferInfo(gl, this.meshBuffer, gl.TRIANGLES);
+    }
+
+    getFrame (id) {
+        const state = this.states.get(id);
+        const points = [];
+        if (state) {
+            for (const drawableId of this.renderer._drawList) {
+                const paths = this.paths(drawableId);
+                const index = paths.indexOf(id);
+                const drawable = this.renderer._allDrawables[drawableId];
+                if (index < 0 || !drawable || !drawable.skin || drawable.skin.private) continue;
+                const steps = paths.slice(index + 1).reverse()
+                    .map(path => this.states.get(path))
+                    .filter(s => s && s.warp)
+                    .map(s => ({world: s.matrix3, inverse: s.inverse3, warp: s.warp}));
+                const pieces = this.mesh(corners(drawable.getAABB()).map(p => [...p, 1]), steps);
+                for (const piece of pieces) {
+                    points.push(...piece.map(v => Warp.point(state.inverse3, [v.p[0] / v.p[2], v.p[1] / v.p[2]])));
+                }
+            }
+        }
+        if (!points.length || !points.every(p => p.every(Number.isFinite))) {
+            return {x: 0, y: 0, width: 100, height: 100};
+        }
+        const bounds = new Rectangle();
+        bounds.initFromPointsAABB(points);
+        return {x: (bounds.left + bounds.right) / 2,
+            y: (bounds.bottom + bounds.top) / 2,
+            width: Math.max(0.01, bounds.width),
+            height: Math.max(0.01, bounds.height)};
     }
 
     isGhosted (id) {
@@ -117,10 +202,13 @@ class ContainerCompositor {
             let parent = root;
             for (const path of this.paths(id)) {
                 const state = this.states.get(path);
-                if (!state || (!(state.enabledEffects & (logical ? COLOR_EFFECTS : ~0)) && !state.clip)) continue;
+                if (!state || (!(state.enabledEffects & (logical ? COLOR_EFFECTS : ~0)) &&
+                    !state.clip && !state.warp)) continue;
                 let node = nodes.get(path);
                 if (!node) {
-                    node = Object.assign({state, children: []}, buffers());
+                    node = Object.assign({state,
+                        ancestors: this.paths(id).slice(0, this.paths(id).indexOf(path)),
+                        children: []}, buffers());
                     nodes.set(path, node);
                     parent.children.push(node);
                 }
@@ -163,6 +251,15 @@ class ContainerCompositor {
 
     // Clip a world-space bounds polygon, including rotated ancestor clips.
     clipBounds (id, bounds) {
+        const steps = this.steps(id);
+        if (steps.length) {
+            const polygons = this.mesh(corners(bounds).map(p => [...p, 1]), steps);
+            const result = new Rectangle();
+            const points = polygons.flatMap(poly => poly.map(v => [v.p[0] / v.p[2], v.p[1] / v.p[2]]));
+            if (points.length) result.initFromPointsAABB(points);
+            else result.initFromBounds(0, 0, 0, 0);
+            return result;
+        }
         if (!this.paths(id).some(path => this.states.get(path) && this.states.get(path).clip)) return bounds;
         let polygon = corners(bounds);
         for (const path of this.paths(id)) {
@@ -218,8 +315,16 @@ class ContainerCompositor {
         for (const node of tree.containers.values()) {
             if (!node.bounds || !(node.state.enabledEffects & ~COLOR_EFFECTS)) continue;
             const frame = new Rectangle();
-            frame.initFromPointsAABB(corners(node.bounds).map(p => point(node.state.world, p[0], p[1])));
-            Rectangle.union(bounds, frame, bounds);
+            const states = [node.state, ...node.ancestors.slice().reverse()
+                .map(id => this.states.get(id))];
+            const steps = states.filter(s => s && s.warp)
+                .map(s => ({world: s.matrix3, inverse: s.inverse3, warp: s.warp}));
+            const pieces = this.mesh(corners(node.bounds).map(p => [...point(node.state.world, ...p), 1]), steps);
+            const points = pieces.flatMap(poly => poly.map(v => [v.p[0] / v.p[2], v.p[1] / v.p[2]]));
+            if (points.length) {
+                frame.initFromPointsAABB(points);
+                Rectangle.union(bounds, frame, bounds);
+            }
         }
         return bounds;
     }
@@ -238,6 +343,8 @@ class ContainerCompositor {
         const points = [];
         for (const child of node.children) points.push(...this._prepare(child, opts, frames));
         if (!node.state || !points.length) return points;
+        node.inputBounds = new Rectangle();
+        node.inputBounds.initFromPointsAABB(points.map(p => point(node.state.inverse, ...p)));
         const frame = frames && frames.get(node.state.id);
         if (frame && frame.bounds) {
             node.bounds = frame.bounds;
@@ -249,6 +356,11 @@ class ContainerCompositor {
                 Object.assign(bounds, node.state.clip);
             }
             node.bounds = bounds;
+        }
+        if (node.state.warp) {
+            const polygons = this.mesh(corners(node.bounds).map(p => [...point(node.state.world, ...p), 1]),
+                [{world: node.state.matrix3, inverse: node.state.inverse3, warp: node.state.warp}]);
+            return polygons.flatMap(poly => poly.map(v => [v.p[0] / v.p[2], v.p[1] / v.p[2]]));
         }
         return corners(node.bounds).map(p => point(node.state.world, p[0], p[1]));
     }
@@ -367,6 +479,9 @@ class ContainerCompositor {
             minMag: opts.containerSensing ? gl.NEAREST : gl.LINEAR
         });
         twgl.setUniforms(shader, Object.assign({}, state.uniforms, {
+            u_warpMesh: 1,
+            u_clipStage: state.clip && state.clip.space === 'stage' ? 1 : 0,
+            u_maskStage: 0,
             u_skin: surface.attachments[0],
             u_mask: surface.attachments[0],
             u_maskMode: 0,
@@ -375,13 +490,17 @@ class ContainerCompositor {
             u_sliceX: [0, 0, 0, 0],
             u_sliceY: [0, 0, 0, 0],
             ...Geometry.clipUniforms(state.clip, state.clip && state.clip.space === 'stage' ?
-                [model[0], model[1], -model[4], -model[5],
-                    model[12] + ((-model[0] + model[4]) / 2), model[13] + ((-model[1] + model[5]) / 2)] :
+                [1, 0, 0, 1, 0, 0] :
                 [bounds.width, 0, 0, -bounds.height, bounds.left, bounds.top]),
             u_projectionMatrix: projection,
             u_modelMatrix: model
         }, opts.extraUniforms));
-        twgl.drawBufferInfo(gl, this.buffer, gl.TRIANGLES);
+        const steps = [{world: state.matrix3, inverse: state.inverse3, warp: state.warp},
+            ...node.ancestors.slice().reverse()
+                .map(id => this.states.get(id))
+                .filter(s => s && s.warp)
+                .map(s => ({world: s.matrix3, inverse: s.inverse3, warp: s.warp}))];
+        this.drawMesh(shader, this.mesh(corners(bounds).map(p => [...point(state.world, ...p), 1]), steps, true));
         r._regionId = null;
     }
 }
