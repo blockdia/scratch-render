@@ -5,6 +5,7 @@ const RenderConstants = require('./RenderConstants');
 const ShaderManager = require('./ShaderManager');
 const EffectTransform = require('./EffectTransform');
 const log = require('./util/log');
+const Geometry = require('./GraphicGeometry');
 
 /**
  * An internal workspace for calculating texture locations from world vectors
@@ -25,6 +26,10 @@ const FLOATING_POINT_ERROR_ALLOWANCE = 1e-6;
  * @return {twgl.v3} [x,y] texture space float vector - transformed by effects and matrix
  */
 const getLocalPosition = (drawable, vec) => {
+    if (drawable._scale[0] === 0 || drawable._scale[1] === 0) {
+        __isTouchingPosition[0] = __isTouchingPosition[1] = -1;
+        return __isTouchingPosition;
+    }
     const compositor = drawable._renderer._containerCompositor;
     if (compositor && compositor.active && compositor.isPointClipped(drawable._id, vec)) {
         __isTouchingPosition[0] = -1;
@@ -53,6 +58,7 @@ const getLocalPosition = (drawable, vec) => {
         localPosition[1] = -1;
         return localPosition;
     }
+    drawable.mapTexturePosition(localPosition, localPosition);
     // Apply texture effect transform if the localPosition is within the drawable's space,
     // and any effects are currently active.
     if (drawable.enabledEffects !== 0 &&
@@ -95,7 +101,10 @@ class Drawable {
              * @type {Array<number>}
              */
             u_silhouetteColor: Drawable.color4fFromID(this._id),
-            u_clipPlane: [0, 0, 0]
+            u_clipPlane: [0, 0, 0],
+            ...Geometry.clipUniforms(null),
+            u_sliceX: [0, 0, 0, 0],
+            u_sliceY: [0, 0, 0, 0]
         };
 
         // Effect values are uniforms too
@@ -125,6 +134,9 @@ class Drawable {
         this._inverseTransformDirty = true;
         this._visible = true;
         this._clipPlane = null;
+        this._clipShape = null;
+        this._clipOffset = [0, 0];
+        this._nineSlice = null;
 
         /** A bitmask identifying which effects are currently in use.
          * @readonly
@@ -171,6 +183,7 @@ class Drawable {
      * It will be recalculated next time it's needed.
      */
     setTransformDirty () {
+        if (this._clipShape && this._clipShape.space === 'stage') this.setConvexHullDirty();
         this._transformDirty = true;
         this._inverseTransformDirty = true;
         this._transformedHullDirty = true;
@@ -239,6 +252,7 @@ class Drawable {
             this._calculateTransform();
         }
         this._updateClipUniform();
+        this._updateGeometryUniforms();
         return this._uniforms;
     }
 
@@ -257,6 +271,7 @@ class Drawable {
         this._renderer.dirty = true;
         this.setConvexHullDirty();
         this._updateClipUniform();
+        this._updateGeometryUniforms();
     }
 
     _updateClipUniform () {
@@ -266,8 +281,8 @@ class Drawable {
             return;
         }
         const [nx, ny, distance] = this._clipPlane;
-        const [width, height] = this.skin.size;
-        const center = this.skin.rotationCenter;
+        const [width, height] = this.getGeometrySize();
+        const center = this.getGeometryCenter();
         // Normalize to keep fragment shader mediump arithmetic within range.
         const divisor = Math.max(1, Math.abs(nx * width), Math.abs(ny * height),
             Math.abs(distance + (nx * center[0]) - (ny * center[1])));
@@ -283,7 +298,62 @@ class Drawable {
      */
     isTexturePositionClipped (point) {
         const plane = this._uniforms.u_clipPlane;
-        return ((point[0] * plane[0]) + (point[1] * plane[1])) > plane[2];
+        return Geometry.clipped(this._uniforms, point) ||
+            ((point[0] * plane[0]) + (point[1] * plane[1])) > plane[2];
+    }
+
+    updateNineSlice (value) {
+        if (JSON.stringify(value) === JSON.stringify(this._nineSlice)) return;
+        this._nineSlice = value ? Object.assign({}, value) : null;
+        this._skinWasAltered();
+    }
+
+    updateClipShape (shape, offset = [0, 0]) {
+        if (JSON.stringify(shape) === JSON.stringify(this._clipShape) &&
+            offset.every((n, i) => n === this._clipOffset[i])) return;
+        this._clipShape = shape ? Object.assign({}, shape) : null;
+        this._clipOffset = offset.slice();
+        this.setConvexHullDirty();
+        this._renderer.dirty = true;
+    }
+
+    getGeometrySize () {
+        const size = this.skin.size;
+        const n = this._nineSlice;
+        return n ? [Math.max(n.width, Math.min(size[0], n.left + n.right), 0.01),
+            Math.max(n.height, Math.min(size[1], n.top + n.bottom), 0.01)] : size;
+    }
+
+    getGeometryCenter () {
+        const center = this.skin.rotationCenter;
+        if (!this._nineSlice) return center;
+        const size = this.getGeometrySize();
+        return [center[0] * size[0] / Math.max(this.skin.size[0], 0.01),
+            center[1] * size[1] / Math.max(this.skin.size[1], 0.01)];
+    }
+
+    _updateGeometryUniforms () {
+        if (!this.skin) return;
+        const [w, h] = this.getGeometrySize();
+        const [cx, cy] = this.getGeometryCenter();
+        const m = this._uniforms.u_modelMatrix;
+        const stage = this._clipShape && this._clipShape.space === 'stage';
+        // Drawable quad's x is reversed relative to texture u; texture v points down.
+        const mapping = stage ? [-m[0], -m[1], m[4], m[5],
+            m[12] + ((m[0] - m[4]) / 2), m[13] + ((m[1] - m[5]) / 2)] :
+            [w, 0, 0, -h, -cx + this._clipOffset[0], cy + this._clipOffset[1]];
+        Object.assign(this._uniforms, Geometry.clipUniforms(this._clipShape, mapping));
+        const n = this._nineSlice;
+        this._uniforms.u_sliceX = n && this.skin.size[0] > 0 ?
+            Geometry.sliceAxis(this.skin.size[0], w, n.left, n.right) : [0, 0, 0, 0];
+        this._uniforms.u_sliceY = n && this.skin.size[1] > 0 ?
+            Geometry.sliceAxis(this.skin.size[1], h, n.top, n.bottom) : [0, 0, 0, 0];
+    }
+
+    mapTexturePosition (point, out) {
+        out[0] = Geometry.mapAxis(point[0], this._uniforms.u_sliceX);
+        out[1] = Geometry.mapAxis(point[1], this._uniforms.u_sliceY);
+        return out;
     }
 
     /**
@@ -457,8 +527,8 @@ class Drawable {
             // Locally assign rotationCenter and skinSize to keep from having
             // the Skin getter properties called twice while locally assigning
             // their components for readability.
-            const rotationCenter = this.skin.rotationCenter;
-            const skinSize = this.skin.size;
+            const rotationCenter = this.getGeometryCenter();
+            const skinSize = this.getGeometrySize();
             const center0 = rotationCenter[0];
             const center1 = rotationCenter[1];
             const skinSize0 = skinSize[0];
@@ -485,7 +555,7 @@ class Drawable {
 
             // Locally assign skinSize to keep from having the Skin getter
             // properties called twice.
-            const skinSize = this.skin.size;
+            const skinSize = this.getGeometrySize();
             const scaledSize = this._skinScale;
             scaledSize[0] = skinSize[0] * this._scale[0] / 100;
             scaledSize[1] = skinSize[1] * this._scale[1] / 100;
@@ -751,6 +821,7 @@ class Drawable {
     updateCPURenderAttributes () {
         this.updateMatrix();
         this._updateClipUniform();
+        this._updateGeometryUniforms();
         // Include parent scaling so CPU sensing uses the same skin resolution as drawing.
         if (this.skin) {
             const scale = this.scale;

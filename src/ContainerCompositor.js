@@ -3,6 +3,7 @@ const Drawable = require('./Drawable');
 const EffectTransform = require('./EffectTransform');
 const ShaderManager = require('./ShaderManager');
 const Rectangle = require('./Rectangle');
+const Geometry = require('./GraphicGeometry');
 
 const IDENTITY = [1, 0, 0, 1, 0, 0];
 const EMPTY_PATH = [];
@@ -80,10 +81,11 @@ class ContainerCompositor {
             const state = this.states.get(path);
             if (!state || !state.clip) continue;
             const m = state.inverse;
-            const x = (m[0] * position[0]) + (m[4] * position[1]) + m[12];
-            const y = (m[1] * position[0]) + (m[5] * position[1]) + m[13];
+            const stage = state.clip.space === 'stage';
+            const x = stage ? position[0] : (m[0] * position[0]) + (m[4] * position[1]) + m[12];
+            const y = stage ? position[1] : (m[1] * position[0]) + (m[5] * position[1]) + m[13];
             const c = state.clip;
-            if (x < c.left || x > c.right || y < c.bottom || y > c.top) return true;
+            if (!Geometry.contains(c, x, y)) return true;
         }
         return false;
     }
@@ -165,8 +167,9 @@ class ContainerCompositor {
         let polygon = corners(bounds);
         for (const path of this.paths(id)) {
             const state = this.states.get(path);
-            if (!state || !state.clip) continue;
-            polygon = polygon.map(p => point(state.inverse, p[0], p[1]));
+            if (!state || !state.clip || state.clip.inverted) continue;
+            const stage = state.clip.space === 'stage';
+            polygon = stage ? polygon : polygon.map(p => point(state.inverse, p[0], p[1]));
             for (const [axis, limit, sign] of [[0, state.clip.left, 1], [0, state.clip.right, -1],
                 [1, state.clip.bottom, 1], [1, state.clip.top, -1]]) {
                 const next = [];
@@ -183,7 +186,7 @@ class ContainerCompositor {
                 }
                 polygon = next;
             }
-            polygon = polygon.map(p => point(state.world, p[0], p[1]));
+            polygon = stage ? polygon : polygon.map(p => point(state.world, p[0], p[1]));
         }
         const result = new Rectangle();
         if (polygon.length) {
@@ -241,7 +244,7 @@ class ContainerCompositor {
         } else {
             const bounds = new Rectangle();
             bounds.initFromPointsAABB(points.map(p => point(node.state.inverse, p[0], p[1])));
-            if (node.state.clip) {
+            if (node.state.clip && !node.state.clip.inverted && node.state.clip.space !== 'stage') {
                 // An explicit clip is also a stable effect frame in container-local Scratch units.
                 Object.assign(bounds, node.state.clip);
             }
@@ -367,6 +370,12 @@ class ContainerCompositor {
             u_skin: surface.attachments[0],
             u_skinSize: [bounds.width, bounds.height],
             u_clipPlane: [0, 0, 1],
+            u_sliceX: [0, 0, 0, 0],
+            u_sliceY: [0, 0, 0, 0],
+            ...Geometry.clipUniforms(state.clip, state.clip && state.clip.space === 'stage' ?
+                [model[0], model[1], -model[4], -model[5],
+                    model[12] + ((-model[0] + model[4]) / 2), model[13] + ((-model[1] + model[5]) / 2)] :
+                [bounds.width, 0, 0, -bounds.height, bounds.left, bounds.top]),
             u_projectionMatrix: projection,
             u_modelMatrix: model
         }, opts.extraUniforms));

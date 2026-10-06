@@ -810,6 +810,16 @@ class RenderWebGL extends EventEmitter {
         return this._setAtomicDrawableOrder(null, order, layer, relative, 0, path);
     }
 
+    updateDrawableNineSlice (drawableID, value) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateNineSlice(value);
+    }
+
+    updateDrawableClipShape (drawableID, shape, offset) {
+        const drawable = this._allDrawables[drawableID];
+        if (drawable) drawable.updateClipShape(shape, offset);
+    }
+
     updateDrawableParentTransform (drawableID, matrix) {
         const drawable = this._allDrawables[drawableID];
         if (drawable) drawable.updateParentTransform(matrix);
@@ -2449,7 +2459,8 @@ class RenderWebGL extends EventEmitter {
             for (; x < width; x++) {
                 _pixelPos[0] = x / width;
                 if (drawable.isTexturePositionClipped(_pixelPos)) continue;
-                EffectTransform.transformPoint(drawable, _pixelPos, _effectPos);
+                drawable.mapTexturePosition(_pixelPos, _effectPos);
+                EffectTransform.transformPoint(drawable, _effectPos, _effectPos);
                 if (drawable.skin.isTouchingLinear(_effectPos)) {
                     currentPoint = [x, y];
                     break;
@@ -2487,7 +2498,8 @@ class RenderWebGL extends EventEmitter {
             for (x = width - 1; x >= 0; x--) {
                 _pixelPos[0] = x / width;
                 if (drawable.isTexturePositionClipped(_pixelPos)) continue;
-                EffectTransform.transformPoint(drawable, _pixelPos, _effectPos);
+                drawable.mapTexturePosition(_pixelPos, _effectPos);
+                EffectTransform.transformPoint(drawable, _effectPos, _effectPos);
                 if (drawable.skin.isTouchingLinear(_effectPos)) {
                     currentPoint = [x, y];
                     break;

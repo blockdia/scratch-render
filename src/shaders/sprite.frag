@@ -45,6 +45,18 @@ uniform vec4 u_backgroundColor;
 
 uniform sampler2D u_skin;
 uniform vec3 u_clipPlane;
+uniform vec4 u_clipShape;
+uniform float u_clipInverse;
+uniform vec3 u_clipRowX;
+uniform vec3 u_clipRowY;
+uniform vec4 u_sliceX;
+uniform vec4 u_sliceY;
+
+float sliceCoordinate(float value, vec4 axis) {
+    if (value < axis.z && axis.z > 0.0) return value * axis.x / axis.z;
+    if (value > 1.0 - axis.w && axis.w > 0.0) return 1.0 - (1.0 - value) * axis.y / axis.w;
+    return axis.x + (value - axis.z) * max(0.0, 1.0 - axis.x - axis.y) / max(0.000001, 1.0 - axis.z - axis.w);
+}
 
 #ifndef DRAW_MODE_background
 varying vec2 v_texCoord;
@@ -118,7 +130,20 @@ void main()
 {
 	#if !(defined(DRAW_MODE_line) || defined(DRAW_MODE_background))
 	if (dot(v_texCoord, u_clipPlane.xy) > u_clipPlane.z) discard;
-	vec2 texcoord0 = v_texCoord;
+    if (u_clipShape.w > 0.0) {
+        vec2 p = abs(vec2(dot(vec3(v_texCoord, 1.0), u_clipRowX), dot(vec3(v_texCoord, 1.0), u_clipRowY)));
+        vec2 halfSize = u_clipShape.xy;
+        bool inside = halfSize.x > 0.0 && halfSize.y > 0.0 && all(lessThanEqual(p, halfSize));
+        if (inside && u_clipShape.w == 2.0) {
+            vec2 q = p / halfSize;
+            inside = dot(q, q) <= 1.0;
+        } else if (inside && u_clipShape.w == 3.0) {
+            vec2 q = max(vec2(0.0), p - halfSize + u_clipShape.z);
+            inside = dot(q, q) <= u_clipShape.z * u_clipShape.z;
+        }
+        if (inside == (u_clipInverse > 0.5)) discard;
+    }
+    vec2 texcoord0 = vec2(sliceCoordinate(v_texCoord.x, u_sliceX), sliceCoordinate(v_texCoord.y, u_sliceY));
 
 	#ifdef ENABLE_mosaic
 	texcoord0 = fract(u_mosaic * texcoord0);
